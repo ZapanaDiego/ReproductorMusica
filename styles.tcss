@@ -1,0 +1,115 @@
+/* ========================================== */
+/* ARCHIVO: styles.tcss */
+/* ========================================== */
+
+/* Transparencia general y eliminación de bordes */
+* {
+    background: transparent;
+    border: none;
+}
+
+Screen {
+    background: transparent;
+}
+
+/* ================= GRID / COLUMNAS ================= */
+#main-layout {
+    layout: horizontal;
+    width: 100%;
+    height: 1fr;
+}
+
+#left-column {
+    width: 60%;
+    height: 1fr;
+    layout: vertical;
+    border-right: solid rgba(255, 255, 255, 0.15); /* Separador elegante */
+    padding: 0 1;
+}
+
+#right-column {
+    width: 40%;
+    height: 1fr;
+    padding: 1;
+}
+
+/* ================= PESTAÑAS Y TEXTO ================= */
+#top-tabs {
+    height: 2;
+    layout: horizontal;
+    margin-top: 1;
+    border-bottom: solid rgba(255, 255, 255, 0.1);
+}
+
+.tab-label {
+    width: auto;
+    padding: 0 3;
+    color: #707080;
+    text-style: bold;
+}
+
+.tab-label.active {
+    color: #00FFFF;
+    text-style: bold underline;
+}
+
+/* ================= COMPONENTES DE DATOS ================= */
+ContentSwitcher {
+    height: 1fr;
+    margin-top: 1;
+}
+
+DataTable {
+    background: transparent;
+    height: 1fr;
+    scrollbar-color: #8A2BE2;
+}
+
+DataTable > .datatable--header {
+    background: transparent;
+    color: #00FFFF;
+    text-style: bold;
+    border-bottom: solid rgba(255, 255, 255, 0.15);
+}
+
+DataTable > .datatable--cursor {
+    background: rgba(138, 43, 226, 0.4); /* Resaltado sutil Morado Neón */
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+DataTable > .datatable--even-row,
+DataTable > .datatable--odd-row {
+    background: transparent;
+}
+
+/* ================= BARRA INFERIOR ================= */
+#bottom-bar {
+    height: 3;
+    layout: horizontal;
+    border-top: solid rgba(255, 255, 255, 0.1);
+    margin-top: 1;
+}
+
+#play-state {
+    width: 25%;
+    content-align: left middle;
+    color: #FF00FF;
+    text-style: bold;
+}
+
+#track-info-container {
+    width: 55%;
+    layout: vertical;
+}
+
+ProgressBar { margin-top: 1; }
+Bar > .bar--bar { color: rgba(255, 255, 255, 0.1); }
+Bar > .bar--complete { color: #00FFFF; }
+
+#time-info {
+    width: 20%;
+    content-align: right middle;
+    color: #00FFFF;
+    text-style: bold;
+}
