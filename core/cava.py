@@ -102,8 +102,27 @@ bit_format = 8bit
                 break
 
     def get_data(self, num_bars: int) -> list:
-        """Adapta el arreglo crudo al tamaño requerido por la UI."""
-        if not self.raw_data:
+        """Adapta el arreglo crudo al tamaño requerido mediante interpolación matemática real."""
+        if not self.raw_data or num_bars <= 0:
             return [0.0] * num_bars
-        step = max(1, len(self.raw_data) / num_bars)
-        return [self.raw_data[min(int(i * step), len(self.raw_data)-1)] for i in range(num_bars)]
+            
+        n_raw = len(self.raw_data)
+        if n_raw == 1:
+            return [self.raw_data[0]] * num_bars
+            
+        result = []
+        for i in range(num_bars):
+            # Mapeo posicional fraccional
+            idx_float = i * (n_raw - 1) / max(1, num_bars - 1)
+            idx_int = int(idx_float)
+            frac = idx_float - idx_int
+            
+            if idx_int >= n_raw - 1:
+                result.append(self.raw_data[-1])
+            else:
+                # Interpolar linealmente entre el índice actual y el siguiente
+                v1 = self.raw_data[idx_int]
+                v2 = self.raw_data[idx_int + 1]
+                result.append(v1 + frac * (v2 - v1))
+                
+        return result

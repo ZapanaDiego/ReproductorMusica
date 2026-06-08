@@ -24,13 +24,11 @@ Temporizador configurado a 0.03 s → ~33 FPS reales.
 Se eligió este valor como equilibrio óptimo entre fluidez visual y coste de CPU
 en la terminal (Textual redirige todo el renderizado a través de Rich).
 
-DISEÑO DE FÍSICA DE PARTÍCULAS – FOCO RÍTMICO
+DISEÑO ESTÉTICO – FOCO RÍTMICO
 -----------------------------------------------
-Las partículas solo explotan cuando la energía promedio de la ZONA BASS supera
-un umbral crítico de 0.85. Nacen exclusivamente desde la columna de impacto
-rítmico, no desde cualquier barra. Esto concentra el efecto visual en los
-momentos de beat fuerte, creando una conexión perceptual directa entre el
-ritmo y la estética de partículas.
+La interpolación visual asegura colores nítidos usando caracteres en 3D
+y adaptando el escalado horizontal dinámicamente mediante la capa
+matemática inferior.
 
 FÍSICA "ANTIGRAVITY PEAKS" (Picos Flotantes)
 ---------------------------------------------
@@ -96,10 +94,7 @@ DECAY = 0.82
 # Si el pico global está por debajo de este umbral, se amplifica todo.
 AUTO_GAIN_CEILING = 0.20
 
-# ── CONSTANTES DE PARTÍCULAS RÍTMICAS ────────────────────────────────────────
-# Umbral de energía bass para disparar partículas (reducido para garantizar emisión).
-BASS_SPARK_THRESHOLD = 0.55
-
+# ── CONSTANTES DE ILUMINACIÓN AMBIENTAL ──────────────────────────────────────
 # Umbral bass para activar color ambiental del ADN.
 AMBIENT_BASS_THRESHOLD = 0.45
 
@@ -152,25 +147,6 @@ def _lerp_rgb(
         a[2] + (b[2] - a[2]) * t,
     )
 
-
-def _particle_color_camaleon(p: dict, bass_avg: float) -> str:
-    """
-    Color dinámico por frame según velocidad vertical y energía de graves.
-
-    Fase de impacto: speed_y > 0.6 AND bass_avg > 0.85 → incandescente.
-    Fase de flotación: lerp de blanco caliente hacia target_color neón frío
-    conforme speed_y decae (t = 1 − speed_y/0.6).
-    """
-    if p["speed_y"] > 0.6 and bass_avg > BASS_SPARK_THRESHOLD:
-        idx = (int(p["x"]) + int(p["y"])) % len(IMPACT_COLORS)
-        return IMPACT_COLORS[idx]
-    warm = _hex_to_rgb("#FFFFFF")
-    cold = _hex_to_rgb(p["target_color"])
-    t = 1.0 - min(1.0, p["speed_y"] / 0.6)
-    r, g, b = _lerp_rgb(warm, cold, t)
-    return _rgb_to_hex(r, g, b)
-
-
 class CavaVisualizer(Static):
     """
     Widget de ecualizador espectral a pantalla completa.
@@ -200,17 +176,13 @@ class CavaVisualizer(Static):
         (self.size) no está disponible hasta que el widget se monta en el DOM.
 
         Estado persistente entre frames:
-        - self.particles:      lista de partículas chispa activas.
         - self.previous_bars:  valores de barra del frame anterior (para decay).
         - self.peaks:          altura máxima alcanzada por cada barra.
         - self.peak_hold:      contador de frames de retardo por barra.
         - self.peak_vel:       velocidad de caída acumulada por barra.
-        - self.current_bg_color: RGB flotante para lerp del fondo.
+        - self.current_bg_color: RGB flotante para lerp del fondo global.
         - self.frame_count:    contador de frames para telemetría periódica.
         """
-        # Lista de dicts; cada partícula tiene posición, carácter y velocidad.
-        self.particles: list[dict] = []
-
         # Valores de barra suavizados del frame anterior (decaimiento).
         self.previous_bars: list[float] = []
 
@@ -223,8 +195,8 @@ class CavaVisualizer(Static):
         # Velocidad de caída actual del pico (se acumula con gravedad).
         self.peak_vel: list[float] = []
 
-        # RGB actual del fondo (lerp hacia objetivo ADN o negro).
-        self.current_bg_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        # RGB actual del fondo (lerp hacia objetivo o púrpura base).
+        self.current_bg_color: tuple[float, float, float] = (8.0, 0.0, 13.0) # Base #08000d
         self.frame_count = 0
 
         self.set_interval(0.03, self.update_visualizer)
@@ -244,11 +216,8 @@ class CavaVisualizer(Static):
           6.  Actualizar iluminación ambiental dinámica.
           7.  Inicializar/redimensionar arrays de picos si cambia el ancho.
           8.  Actualizar física de picos (Antigravity Peaks).
-          9.  Actualizar física de partículas (movimiento + purga).
-         10.  Emitir partículas focalizadas en impactos de bass.
-         11.  Pre-calcular particle_map O(1).
-         12.  Renderizar cada celda de la terminal.
-         13.  Enviar el Text compuesto a Textual.
+          9.  Renderizar cada celda de la terminal.
+         10.  Enviar el Text compuesto a Textual.
         """
 
         # ── 1. DIMENSIONES ───────────────────────────────────────────────────
@@ -306,23 +275,29 @@ class CavaVisualizer(Static):
         bass_zone = bars[:bass_end]
         bass_avg = sum(bass_zone) / len(bass_zone) if bass_zone else 0.0
 
-        # ── 6. FONDO AMBIENTAL (lerp RGB, sin strings hex inválidos) ────────
-        dna = bridge.get_acoustic_dna()
-        adn_r, adn_g, adn_b = _hex_to_rgb(dna["ambient_hex"])
-
+        # ── 6. FONDO AMBIENTAL GLOBAL (EMA) ──────────────────────────────────
         if bass_avg > AMBIENT_BASS_THRESHOLD:
-            target_r, target_g, target_b = adn_r, adn_g, adn_b
-            target_bg = dna["ambient_hex"]
+            # Color azulado/cálido reactivo al bajo (ej #140022 o ADN derivado si lo deseas)
+            target_r, target_g, target_b = _hex_to_rgb("#140022")
+            target_bg = "#140022"
         else:
-            target_r, target_g, target_b = 0.0, 0.0, 0.0
-            target_bg = "#000000"
+            # Púrpura abisal oscuro
+            target_r, target_g, target_b = _hex_to_rgb("#08000d")
+            target_bg = "#08000d"
 
         curr_r, curr_g, curr_b = self.current_bg_color
-        curr_r += (target_r - curr_r) * AMBIENT_LERP
-        curr_g += (target_g - curr_g) * AMBIENT_LERP
-        curr_b += (target_b - curr_b) * AMBIENT_LERP
+        # Suavizado Exponencial/EMA con alpha = 0.15
+        curr_r = curr_r * 0.85 + target_r * 0.15
+        curr_g = curr_g * 0.85 + target_g * 0.15
+        curr_b = curr_b * 0.85 + target_b * 0.15
+        
         self.current_bg_color = (curr_r, curr_g, curr_b)
-        self.styles.background = Color(int(curr_r), int(curr_g), int(curr_b))
+        
+        # Aplicamos el ambient glow al FONDO GLOBAL de la pantalla
+        try:
+            self.app.screen.styles.background = Color(int(curr_r), int(curr_g), int(curr_b))
+        except Exception:
+            pass
 
         # ── 7. REDIMENSIONAR ARRAYS DE PICOS ─────────────────────────────────
         # Si el ancho cambia (resize de terminal), reiniciamos los picos.
@@ -363,54 +338,14 @@ class CavaVisualizer(Static):
                     self.peak_vel[x]  += PEAK_GRAVITY
                     self.peaks[x]      = max(0.0, self.peaks[x] - self.peak_vel[x])
 
-        # ── 9. EMISIÓN DE PARTÍCULAS (antes de mover, para renderizar en el frame) ─
-        spark_bass_end = max(1, int(w * 0.40))
-        if bass_avg > BASS_SPARK_THRESHOLD:
-            for x in range(spark_bass_end):
-                val = bars[x]
-                if val > 0.35 and random.random() < 0.30:
-                    self.particles.append({
-                        'x': float(x),
-                        'y': float(h - 1 - int(val * max(1, h - 1))),
-                        'char': random.choice(['*', '+', '•', '°', '✦']),
-                        'color': '#FFFFFF',
-                        'target_color': random.choice(FLOAT_COLORS),
-                        'speed_y': random.uniform(0.3, 0.8),
-                        'speed_x': random.uniform(-0.5, 0.5),
-                    })
-
-        # ── 10. FÍSICA DE PARTÍCULAS (mover, colorear, purgar fuera de pantalla) ─
-        next_particles: list[dict] = []
-        for p in self.particles:
-            p['y'] -= p['speed_y']
-            p['x'] += p['speed_x']
-            p['speed_y'] *= 0.95
-            p['color'] = _particle_color_camaleon(p, bass_avg)
-            px, py = int(p['x']), int(p['y'])
-            if 0 <= px < w and 0 <= py < h:
-                next_particles.append(p)
-        self.particles = next_particles
-
         self.frame_count += 1
         if self.frame_count % 30 == 0:
             logger.info(
-                f"Bass Avg: {bass_avg:.2f} | Partículas: {len(self.particles)} | "
+                f"Bass Avg: {bass_avg:.2f} | "
                 f"Fondo Objetivo: {target_bg} | Pico: {max(bars):.2f}"
             )
 
-        # ── 11. PRE-CÁLCULO DEL MAPA DE PARTÍCULAS O(1) ──────────────────────
-        # Construimos un dict {(x, y): partícula} al inicio del frame.
-        # Esto convierte la consulta "¿hay una partícula en esta celda?"
-        # de O(n_partículas) (bucle lineal) a O(1) (lookup de dict).
-        # Complejidad total: O(n_partículas) una vez vs O(w × h × n_partículas)
-        # si se hiciera la búsqueda dentro del doble bucle de renderizado.
-        particle_map: dict[tuple[int, int], dict] = {
-            (int(p['x']), int(p['y'])): p
-            for p in self.particles
-            if 0 <= int(p['x']) < w and 0 <= int(p['y']) < h
-        }
-
-        # ── 12. RENDERIZADO CELDA A CELDA ─────────────────────────────────────
+        # ── 9. RENDERIZADO CELDA A CELDA ───────────────────────────────────────
         # Recorremos la matriz de la terminal fila por fila (y) y columna por
         # columna (x). Para cada celda decidimos qué carácter y color mostrar.
         lines: list[Text] = []
@@ -463,21 +398,14 @@ class CavaVisualizer(Static):
                 else:
                     peak_draw_row = -1   # Sin pico activo
 
-                # PRIORIDAD DE RENDERIZADO (de mayor a menor prioridad):
-                #   1. Partícula chispa  (más importante: efectos dinámicos).
-                #   2. Pico flotante     (indicador de máximo histórico).
-                #   3. Barra espectral   (contenido principal).
-                #   4. Espacio vacío.
-                particle = particle_map.get((x, y))
-                if particle is not None:
-                    # Partícula chispa: color y carácter propios.
-                    line_text.append(particle['char'],
-                                     style=f'bold {particle["color"]}')
-
-                elif y == peak_draw_row and peak_val > 0.01:
+                # PRIORIDAD DE RENDERIZADO:
+                #   1. Pico flotante     (indicador de máximo histórico).
+                #   2. Barra espectral   (contenido principal).
+                #   3. Espacio vacío.
+                if y == peak_draw_row and peak_val > 0.01:
                     # Pico flotante: carácter "▔" en BLANCO BRILLANTE.
                     # Se usa bold + #FFFFFF para máximo contraste visual
-                    # contra cualquier fondo (negro, morado, cian abisal).
+                    # contra cualquier fondo.
                     line_text.append('▔', style='bold #FFFFFF')
 
                 elif char_to_draw != ' ':
@@ -490,7 +418,7 @@ class CavaVisualizer(Static):
 
             lines.append(line_text)
 
-        # ── 13. ENVIAR A TEXTUAL ──────────────────────────────────────────────
+        # ── 10. ENVIAR A TEXTUAL ──────────────────────────────────────────────
         # Unimos las líneas con saltos de línea y actualizamos el widget.
         # Textual solo redibuja los caracteres que cambiaron (diff interno),
         # por lo que el coste real de render es proporcional al área activa.

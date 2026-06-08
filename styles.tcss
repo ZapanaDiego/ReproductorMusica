@@ -35,7 +35,7 @@ Screen {
 #panel-right {
     width: 30%;
     height: 100%;
-    padding: 1 2;
+    padding: 0;
 }
 
 #panel-bottom {
@@ -45,9 +45,10 @@ Screen {
 
 /* Paneles "Glassmorphism" Flotantes */
 .glass-panel {
-    background: #0c0014 60%;
+    background: rgba(12, 0, 20, 0.5);
     border: heavy #1a1a1a;
-    margin: 1 1;
+    margin: 0;
+    padding: 0;
 }
 
 /* ================= INFO PANEL ================= */
@@ -66,7 +67,8 @@ Screen {
     height: 3;
     layout: horizontal;
     border-bottom: solid rgba(138, 43, 226, 0.3); /* Violeta sutil */
-    padding-top: 1;
+    padding: 0;
+    margin: 0;
 }
 
 .tab-label {
@@ -85,8 +87,8 @@ Screen {
 /* ================= COMPONENTES DE DATOS ================= */
 ContentSwitcher {
     height: 1fr;
-    margin-top: 1;
-    padding: 0 1;
+    margin: 0;
+    padding: 0;
 }
 
 DataTable {
@@ -118,8 +120,8 @@ DataTable > .datatable--odd-row {
     height: 4;
     layout: horizontal;
     border-top: solid rgba(138, 43, 226, 0.3);
-    padding-top: 1;
-    margin: 0 1;
+    padding: 0;
+    margin: 0;
 }
 
 #play-state {
@@ -135,8 +137,8 @@ DataTable > .datatable--odd-row {
 }
 
 ProgressBar { margin-top: 1; }
-Bar > .bar--bar { color: rgba(138, 43, 226, 0.2); }
-Bar > .bar--complete { color: #FF00FF; } /* Magenta para el progreso */
+Bar > .bar--bar { color: #140022; }
+Bar > .bar--complete { color: #00FFFF; }
 
 #time-info {
     width: 20%;
