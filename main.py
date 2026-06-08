@@ -12,6 +12,7 @@ from core.input import InputController
 from ui.visualizer import CavaVisualizer
 from ui.views import LibraryView, RandomQueueView, DirectoriesView
 from ui.player import PlayerBottomBar
+from ui.info_panel import InfoPanel
 
 class MusicPlayerApp(App):
     CSS_PATH = "styles.tcss"
@@ -25,26 +26,31 @@ class MusicPlayerApp(App):
         self.last_queue_version = -1
 
     def compose(self) -> ComposeResult:
-        # Estructura limpia de Columnas (60% / 40%)
         with Container(id="main-layout"):
             
-            # COLUMNA IZQUIERDA: Datos y Navegación
-            with Vertical(id="left-column"):
-                with Horizontal(id="top-tabs"):
-                    yield Label("  [U] BIBLIOTECA  ", id="tab-library", classes="tab-label active")
-                    yield Label("  [I] COLA ALEATORIA  ", id="tab-queue", classes="tab-label")
-                    yield Label("  [O] DIRECTORIOS  ", id="tab-directories", classes="tab-label")
+            # SECCIÓN SUPERIOR (70% Tablas / 30% Info)
+            with Horizontal(id="top-section"):
+                
+                # PANEL 1: Tablas
+                with Vertical(id="panel-left", classes="glass-panel"):
+                    with Horizontal(id="top-tabs"):
+                        yield Label("  [U] BIBLIOTECA  ", id="tab-library", classes="tab-label active")
+                        yield Label("  [I] COLA ALEATORIA  ", id="tab-queue", classes="tab-label")
+                        yield Label("  [O] DIRECTORIOS  ", id="tab-directories", classes="tab-label")
 
-                with ContentSwitcher(initial="library", id="views-switcher"):
-                    yield LibraryView(id="library")
-                    yield RandomQueueView(id="queue")
-                    yield DirectoriesView(id="directories")
-
-                yield PlayerBottomBar(id="bottom-bar")
-
-            # COLUMNA DERECHA: Renderizado Visual (CAVA y Partículas)
-            with Vertical(id="right-column"):
+                    with ContentSwitcher(initial="library", id="views-switcher"):
+                        yield LibraryView(id="library")
+                        yield RandomQueueView(id="queue")
+                        yield DirectoriesView(id="directories")
+                
+                # PANEL 2: Info y Atajos
+                with Vertical(id="panel-right", classes="glass-panel"):
+                    yield InfoPanel(id="info-panel")
+            
+            # PANEL 3: Visualizador y Reproductor
+            with Vertical(id="panel-bottom", classes="glass-panel"):
                 yield CavaVisualizer()
+                yield PlayerBottomBar(id="bottom-bar")
 
     def on_mount(self) -> None:
         self.query_one("#table-library", DataTable).add_columns("ID", "Música", "Artista", "Calificación")
@@ -141,6 +147,7 @@ class MusicPlayerApp(App):
         self.query_one("#bottom-bar", PlayerBottomBar).update_status(
             track, self.bridge.is_playing(), self.bridge.get_progress()
         )
+        self.query_one("#info-panel", InfoPanel).update_info(track)
 
         curr_version = self.bridge.get_queue_version()
         if curr_version != self.last_queue_version:

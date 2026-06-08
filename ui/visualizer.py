@@ -110,7 +110,8 @@ PEAK_HOLD_FRAMES = 18
 
 # Aceleración gravitatoria aplicada al pico por frame (en unidades de altura
 # normalizada). Se acumula progresivamente para simular caída libre: v = v + a.
-PEAK_GRAVITY = 0.0022
+# Aumentado para un rebote más reactivo.
+PEAK_GRAVITY = 0.0035
 
 # Velocidad inicial de caída cuando el retardo termina.
 PEAK_FALL_START = 0.001
@@ -119,10 +120,10 @@ PEAK_FALL_START = 0.001
 AMBIENT_LERP = 0.15
 
 # Colores incandescentes de fase de impacto (alta velocidad + bass > 0.85).
-IMPACT_COLORS = ("#FFFFFF", "#FFCC00", "#FF4500")
+IMPACT_COLORS = ("#FFFFFF", "#00FFFF", "#FF00FF")
 
 # Colores neón fríos de fase de flotación (estela camaleónica).
-FLOAT_COLORS = ("#FF00FF", "#00FFFF", "#00FF66")
+FLOAT_COLORS = ("#8A2BE2", "#00FFFF", "#FF00FF")
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
@@ -182,10 +183,10 @@ class CavaVisualizer(Static):
 
     DEFAULT_CSS = """
     CavaVisualizer {
-        width: 1fr;
+        width: 100%;
         height: 1fr;
         color: auto;
-        background: #000000;
+        background: transparent;
     }
     """
 
@@ -374,7 +375,7 @@ class CavaVisualizer(Static):
                         'char': random.choice(['*', '+', '•', '°', '✦']),
                         'color': '#FFFFFF',
                         'target_color': random.choice(FLOAT_COLORS),
-                        'speed_y': random.uniform(0.7, 1.5),
+                        'speed_y': random.uniform(0.3, 0.8),
                         'speed_x': random.uniform(-0.5, 0.5),
                     })
 
@@ -437,24 +438,19 @@ class CavaVisualizer(Static):
                 # donde 0 es arriba y h-1 es abajo.
                 bar_top = h - 1 - int(val * h)
 
-                # CÁLCULO DEL CARÁCTER DE BARRA
+                # CÁLCULO DEL CARÁCTER DE BARRA 3D BEVELED
                 char_to_draw = ' '
                 if y >= bar_top:
-                    # Esta celda está dentro del cuerpo de la barra.
                     dist_from_floor = h - 1 - y
                     bar_span        = max(1, h - bar_top)
-                    # rel: posición relativa dentro de la barra [0=base, 1=tope].
                     rel = dist_from_floor / bar_span
-                    if rel >= 0.92:
-                        # Borde superior de la barra → bloque completo.
-                        char_to_draw = '█'
-                    elif rel >= 0.55:
-                        # Zona media → carácter de bloque proporcional.
-                        idx = int((rel - 0.55) / 0.37 * (len(BAR_CHARS) - 2)) + 1
-                        char_to_draw = BAR_CHARS[max(1, min(idx, len(BAR_CHARS) - 1))]
+                    
+                    if y == bar_top:
+                        # Borde superior de la barra: Textura de relieve/sombreado
+                        char_to_draw = '▓'
                     else:
-                        # Base de la barra → bloque pequeño.
-                        char_to_draw = BAR_CHARS[1]
+                        # Cuerpo interno sólido
+                        char_to_draw = '█'
 
                 # RENDERIZADO DE PICO FLOTANTE (Antigravity Peak)
                 # Calculamos la fila de pantalla donde debe dibujarse el pico.

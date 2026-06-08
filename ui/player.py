@@ -8,7 +8,7 @@ from textual.widgets import Label, ProgressBar
 class PlayerBottomBar(Horizontal):
     """Barra inferior minimalista flotante de Musikcube."""
     def compose(self):
-        yield Label("▶ REPRODUCIENDO", id="play-state")
+        yield Label("▶ SONANDO AHORA", id="play-state")
         with Vertical(id="track-info-container"):
             yield Label("Ninguna pista activa", id="track-title")
             yield ProgressBar(total=100, show_eta=False, id="progress-bar")
@@ -20,7 +20,7 @@ class PlayerBottomBar(Horizontal):
 
     def update_status(self, track, is_playing: bool, progress: float):
         if track:
-            state = "▶ REPRODUCIENDO" if is_playing else "⏸ EN PAUSA"
+            state = "▶ SONANDO AHORA" if is_playing else "⏸ EN PAUSA"
             self.query_one("#play-state", Label).update(state)
             
             self.query_one("#track-title", Label).update(

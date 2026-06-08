@@ -2,7 +2,8 @@
 /* ARCHIVO: styles.tcss */
 /* ========================================== */
 
-/* Transparencia general y eliminación de bordes */
+/* Paleta: Base #0c0014, Accento1 #FF00FF, Accento2 #00FFFF, Accento3 #8A2BE2 */
+
 * {
     background: transparent;
     border: none;
@@ -14,31 +15,58 @@ Screen {
 
 /* ================= GRID / COLUMNAS ================= */
 #main-layout {
+    layout: vertical;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+}
+
+#top-section {
     layout: horizontal;
     width: 100%;
-    height: 1fr;
+    height: 65%;
 }
 
-#left-column {
-    width: 60%;
-    height: 1fr;
-    layout: vertical;
-    border-right: solid rgba(255, 255, 255, 0.15); /* Separador elegante */
-    padding: 0 1;
+#panel-left {
+    width: 70%;
+    height: 100%;
 }
 
-#right-column {
-    width: 40%;
-    height: 1fr;
-    padding: 1;
+#panel-right {
+    width: 30%;
+    height: 100%;
+    padding: 1 2;
+}
+
+#panel-bottom {
+    width: 100%;
+    height: 35%;
+}
+
+/* Paneles "Glassmorphism" Flotantes */
+.glass-panel {
+    background: #0c0014 60%;
+    border: heavy #1a1a1a;
+    margin: 1 1;
+}
+
+/* ================= INFO PANEL ================= */
+.info-title {
+    color: #FFFFFF;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.info-meta {
+    color: #707080;
 }
 
 /* ================= PESTAÑAS Y TEXTO ================= */
 #top-tabs {
-    height: 2;
+    height: 3;
     layout: horizontal;
-    margin-top: 1;
-    border-bottom: solid rgba(255, 255, 255, 0.1);
+    border-bottom: solid rgba(138, 43, 226, 0.3); /* Violeta sutil */
+    padding-top: 1;
 }
 
 .tab-label {
@@ -49,14 +77,16 @@ Screen {
 }
 
 .tab-label.active {
-    color: #00FFFF;
+    color: #00FFFF; /* Cian Neón */
     text-style: bold underline;
+    background: rgba(0, 255, 255, 0.1);
 }
 
 /* ================= COMPONENTES DE DATOS ================= */
 ContentSwitcher {
     height: 1fr;
     margin-top: 1;
+    padding: 0 1;
 }
 
 DataTable {
@@ -69,11 +99,11 @@ DataTable > .datatable--header {
     background: transparent;
     color: #00FFFF;
     text-style: bold;
-    border-bottom: solid rgba(255, 255, 255, 0.15);
+    border-bottom: solid rgba(255, 255, 255, 0.1);
 }
 
 DataTable > .datatable--cursor {
-    background: rgba(138, 43, 226, 0.4); /* Resaltado sutil Morado Neón */
+    background: rgba(255, 0, 255, 0.3); /* Resaltado Magenta Eléctrico */
     color: #FFFFFF;
     text-style: bold;
 }
@@ -83,18 +113,19 @@ DataTable > .datatable--odd-row {
     background: transparent;
 }
 
-/* ================= BARRA INFERIOR ================= */
+/* ================= BARRA INFERIOR (REPRODUCTOR) ================= */
 #bottom-bar {
-    height: 3;
+    height: 4;
     layout: horizontal;
-    border-top: solid rgba(255, 255, 255, 0.1);
-    margin-top: 1;
+    border-top: solid rgba(138, 43, 226, 0.3);
+    padding-top: 1;
+    margin: 0 1;
 }
 
 #play-state {
     width: 25%;
     content-align: left middle;
-    color: #FF00FF;
+    color: #00FFFF;
     text-style: bold;
 }
 
@@ -104,12 +135,12 @@ DataTable > .datatable--odd-row {
 }
 
 ProgressBar { margin-top: 1; }
-Bar > .bar--bar { color: rgba(255, 255, 255, 0.1); }
-Bar > .bar--complete { color: #00FFFF; }
+Bar > .bar--bar { color: rgba(138, 43, 226, 0.2); }
+Bar > .bar--complete { color: #FF00FF; } /* Magenta para el progreso */
 
 #time-info {
     width: 20%;
     content-align: right middle;
-    color: #00FFFF;
+    color: #FF00FF;
     text-style: bold;
 }

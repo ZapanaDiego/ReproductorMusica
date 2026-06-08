@@ -37,9 +37,9 @@ ignore = 0
 
 [output]
 method = raw
-data_format = ascii
 raw_target = /dev/stdout
-ascii_max_range = 1000
+data_format = binary
+bit_format = 8bit
 """
         try:
             # Crear configuración temporal
@@ -47,17 +47,16 @@ ascii_max_range = 1000
             with os.fdopen(fd, 'w') as f:
                 f.write(config)
             
-            # Lanzar el subproceso real
+            # Lanzar el subproceso real (sin text=True para leer binario)
             self.process = subprocess.Popen(
                 ['cava', '-p', path],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True
+                stderr=subprocess.DEVNULL
             )
             self._running = True
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
-            logger.info("Subproceso CAVA iniciado correctamente.")
+            logger.info("Subproceso CAVA iniciado correctamente en modo binario de cero latencia.")
             
         except FileNotFoundError:
             logger.error("Ejecutable 'cava' no encontrado en Linux. Se retornarán datos vacíos.")
@@ -65,21 +64,39 @@ ascii_max_range = 1000
             logger.error(f"Error crítico al iniciar CAVA: {e}")
 
     def _read_loop(self):
-        """Lee el stdout crudo constantemente."""
+        """Lee el stdout binario crudo y elimina el buffer bloat."""
+        import time
+        fd = self.process.stdout.fileno()
+        os.set_blocking(fd, False)
+        
+        buffer = bytearray()
+        
         while self._running and self.process:
             try:
-                line = self.process.stdout.readline()
-                if not line:
+                chunk = os.read(fd, 4096)
+                if not chunk:
                     break
+                buffer.extend(chunk)
                 
-                # CAVA retorna valores separados por ';'
-                values = line.strip().split(';')
-                parsed = [min(1.0, int(v) / 1000.0) for v in values if v.isdigit()]
-                
-                if parsed:
-                    if len(parsed) < self.bars:
-                        parsed.extend([0.0] * (self.bars - len(parsed)))
-                    self.raw_data = parsed[:self.bars]
+                # Extraemos solo el último frame disponible (Buffer Bloat fix)
+                frames_available = len(buffer) // self.bars
+                if frames_available > 0:
+                    last_frame_start = (frames_available - 1) * self.bars
+                    last_frame = buffer[last_frame_start : last_frame_start + self.bars]
+                    buffer = buffer[frames_available * self.bars :]
+                    
+                    # Convertir bytes (0-255) a floats (0.0-1.0)
+                    parsed = [b / 255.0 for b in last_frame]
+                    
+                    # Autoganancia extrema
+                    max_val = max(parsed) if parsed else 0.0
+                    if max_val > 0.01:
+                        gain = min(1.0 / max_val, 5.0) # Ganancia máxima de 5x
+                        parsed = [min(1.0, v * gain) for v in parsed]
+                        
+                    self.raw_data = parsed
+            except BlockingIOError:
+                time.sleep(0.005)
             except Exception as e:
                 logger.error(f"Error procesando el flujo de CAVA: {e}")
                 break
