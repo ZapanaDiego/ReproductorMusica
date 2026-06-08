@@ -1,8 +1,22 @@
 /* ========================================== */
-/* ARCHIVO: styles.tcss */
+/* ARCHIVO: styles.tcss  — v3 Neon Dark Harmony */
 /* ========================================== */
+/*
+FONDOS (oscuros, reactivos desde visualizer.py):
+  #0a0a0f  Negro abismal    → Silencio
+  #0d1f3c  Azul medianoche  → Bass
+  #1a0a2e  Púrpura abismal  → Medios
+  #2a0a1a  Carmín oscuro    → Agudos/drop
 
-/* Paleta: Base #0c0014, Accento1 #FF00FF, Accento2 #00FFFF, Accento3 #8A2BE2 */
+BARRAS (brillantes, gestionadas en Python):
+  #00d4ff  Cian eléctrico   → Base grave
+  #7b2fff  Violeta neón     → Cuerpo
+  #ff2d78  Rosa eléctrico   → Cima
+  #ffb700  Ámbar dorado     → Pico flotante
+
+REGLA DE ORO: ningún elemento de UI usa los mismos colores que las barras.
+Los elementos de UI usan versiones MÁS OSCURAS/OPACAS para no competir.
+*/
 
 * {
     background: transparent;
@@ -13,7 +27,8 @@ Screen {
     background: transparent;
 }
 
-/* ================= GRID / COLUMNAS ================= */
+/* ================= LAYOUT ================= */
+
 #main-layout {
     layout: vertical;
     width: 100%;
@@ -43,15 +58,23 @@ Screen {
     height: 35%;
 }
 
-/* Paneles "Glassmorphism" Flotantes */
-.glass-panel {
-    background: rgba(12, 0, 20, 0.5);
-    border: heavy #1a1a1a;
+/* ── Glassmorphism: cristal ahumado que deja pasar el glow del Screen ───── */
+
+.glass-panel,
+#info-panel {
+    background: rgba(0, 0, 0, 0.40);
+    /* Borde: violeta neón muy opaco — visible pero no agresivo */
+    border: heavy rgba(123, 47, 255, 0.20);
     margin: 0;
     padding: 0;
 }
 
+CavaVisualizer {
+    background: transparent;
+}
+
 /* ================= INFO PANEL ================= */
+
 .info-title {
     color: #FFFFFF;
     text-style: bold;
@@ -59,14 +82,17 @@ Screen {
 }
 
 .info-meta {
-    color: #707080;
+    /* Texto secundario: blanco atenuado — legible sobre cualquier fondo oscuro */
+    color: rgba(255, 255, 255, 0.50);
 }
 
-/* ================= PESTAÑAS Y TEXTO ================= */
+/* ================= PESTAÑAS ================= */
+
 #top-tabs {
     height: 3;
     layout: horizontal;
-    border-bottom: solid rgba(138, 43, 226, 0.3); /* Violeta sutil */
+    /* Divisor: cian eléctrico muy transparente */
+    border-bottom: solid rgba(0, 212, 255, 0.18);
     padding: 0;
     margin: 0;
 }
@@ -74,17 +100,20 @@ Screen {
 .tab-label {
     width: auto;
     padding: 0 3;
-    color: #707080;
+    color: rgba(255, 255, 255, 0.40);
     text-style: bold;
 }
 
 .tab-label.active {
-    color: #00FFFF; /* Cian Neón */
+    /* Pestaña activa: cian eléctrico — el único elemento que roba un color de barra,
+       justificado porque está en la UI superior, lejos del espectro */
+    color: #00d4ff;
     text-style: bold underline;
-    background: rgba(0, 255, 255, 0.1);
+    background: rgba(0, 212, 255, 0.08);
 }
 
 /* ================= COMPONENTES DE DATOS ================= */
+
 ContentSwitcher {
     height: 1fr;
     margin: 0;
@@ -94,19 +123,22 @@ ContentSwitcher {
 DataTable {
     background: transparent;
     height: 1fr;
-    scrollbar-color: #8A2BE2;
+    /* Scrollbar: violeta neón oscuro */
+    scrollbar-color: rgba(123, 47, 255, 0.60);
 }
 
 DataTable > .datatable--header {
     background: transparent;
-    color: #00FFFF;
+    /* Encabezado: cian atenuado — legible, no compite con las barras */
+    color: rgba(0, 212, 255, 0.80);
     text-style: bold;
-    border-bottom: solid rgba(255, 255, 255, 0.1);
+    border-bottom: solid rgba(123, 47, 255, 0.15);
 }
 
 DataTable > .datatable--cursor {
-    background: rgba(255, 0, 255, 0.3); /* Resaltado Magenta Eléctrico */
-    color: #FFFFFF;
+    /* Cursor: rosa eléctrico muy transparente + texto ámbar */
+    background: rgba(255, 45, 120, 0.18);
+    color: #ffb700;
     text-style: bold;
 }
 
@@ -115,19 +147,23 @@ DataTable > .datatable--odd-row {
     background: transparent;
 }
 
-/* ================= BARRA INFERIOR (REPRODUCTOR) ================= */
+/* ================= BARRA INFERIOR ================= */
+
 #bottom-bar {
     height: 4;
     layout: horizontal;
-    border-top: solid rgba(138, 43, 226, 0.3);
+    /* Divisor superior: rosa eléctrico, muy opaco */
+    border-top: solid rgba(255, 45, 120, 0.22);
     padding: 0;
     margin: 0;
+    background: rgba(0, 0, 0, 0.45);
 }
 
 #play-state {
     width: 25%;
     content-align: left middle;
-    color: #00FFFF;
+    /* Estado: ámbar dorado — cálido, atención sin agresividad */
+    color: #ffb700;
     text-style: bold;
 }
 
@@ -136,13 +172,24 @@ DataTable > .datatable--odd-row {
     layout: vertical;
 }
 
-ProgressBar { margin-top: 1; }
-Bar > .bar--bar { color: #140022; }
-Bar > .bar--complete { color: #00FFFF; }
+ProgressBar {
+    margin-top: 1;
+}
+
+Bar > .bar--bar {
+    /* Fondo vacío de la barra: negro translúcido */
+    color: rgba(0, 0, 0, 0.50);
+}
+
+Bar > .bar--complete {
+    /* Relleno de progreso: cian eléctrico — coherente con la zona grave del EQ */
+    color: #00d4ff;
+}
 
 #time-info {
     width: 20%;
     content-align: right middle;
-    color: #FF00FF;
+    /* Tiempo: blanco atenuado — informativo, no decorativo */
+    color: rgba(255, 255, 255, 0.70);
     text-style: bold;
 }
