@@ -23,7 +23,12 @@ class MusicPlayerApp(App):
         self.input_manager = InputController(self.bridge, self)
         
         self.active_tab = "library"
-        self.last_queue_version = -1
+        # Versiones cacheadas: la UI solo repuebla DataTables cuando cambian.
+        self.last_queue_version   = -1
+        self.last_library_version = -1
+        # Estado cacheado para evitar reparsear etiquetas cada tick.
+        self._last_track_id = -999
+        self._last_playing  = None
 
     def compose(self) -> ComposeResult:
         with Container(id="main-layout"):
@@ -57,8 +62,13 @@ class MusicPlayerApp(App):
         self.query_one("#table-queue", DataTable).add_columns("ID", "Música", "Artista", "Calificación")
         self.query_one("#table-directories", DataTable).add_columns("Directorio Escaneado", "Estado del Sistema")
 
+        # Poblado inicial único. A partir de aquí, las tablas solo se
+        # reconstruyen cuando cambia su versión (cola/biblioteca).
+        self._populate_initial()
+        self.last_queue_version   = self.bridge.get_queue_version()
+        self.last_library_version = self.bridge.get_library_version()
+
         self.set_interval(0.1, self.update_ui)
-        self._populate_all()
         self.bridge.play()
 
     def on_key(self, event) -> None:
@@ -74,46 +84,23 @@ class MusicPlayerApp(App):
 
         self.query_one(f"#tab-{tab_name}", Label).add_class("active")
         self.query_one("#views-switcher", ContentSwitcher).current = tab_name
-        
-        table = self.query_one(f"#table-{tab_name}", DataTable)
-        table.focus()
-        self.force_queue_repaint()
+        self.query_one(f"#table-{tab_name}", DataTable).focus()
 
     def notify_random_mode(self, is_rand: bool):
+        # Solo cambia la etiqueta visual; el repintado de la cola lo dispara
+        # el cambio de queue_version detectado en update_ui.
         mode_label = "  [I] COLA ALEATORIA (RND)  " if is_rand else "  [I] COLA ALEATORIA  "
         self.query_one("#tab-queue", Label).update(mode_label)
-        self._populate_all()
-        self.force_queue_repaint()
 
     def play_current_selection(self):
         table = self.query_one(f"#table-{self.active_tab}", DataTable)
         if table.cursor_row is not None:
-            if self.active_tab == "queue":
-                self.bridge.jump_to_index(table.cursor_row)
-            elif self.active_tab == "library":
-                track = self.bridge.get_library()[table.cursor_row]
-                for i, t in enumerate(self.bridge.get_queue()):
-                    if t.id == track.id:
-                        self.bridge.jump_to_index(i)
-                        break
-            self.force_queue_repaint()
+            self.bridge.play_selection(self.active_tab, table.cursor_row)
 
     def rate_current_selection(self, stars: int):
         table = self.query_one(f"#table-{self.active_tab}", DataTable)
         if table.cursor_row is not None:
-            track = None
-            if self.active_tab == "library":
-                track = self.bridge.get_library()[table.cursor_row]
-            elif self.active_tab == "queue":
-                track = self.bridge.get_queue()[table.cursor_row]
-            
-            if track:
-                self.bridge.set_rating(track.id, stars)
-                self._populate_all()
-                table.move_cursor(row=table.cursor_row)
-
-    def force_queue_repaint(self):
-        self.last_queue_version = -1
+            self.bridge.rate_selection(self.active_tab, table.cursor_row, stars)
 
     # --- RENDERIZADO Y ACTUALIZACIÓN UI ---
 
@@ -126,40 +113,63 @@ class MusicPlayerApp(App):
         stars = Text(("★" * track.stars) + ("☆" * (3 - track.stars)), style="bold #FF00FF")
         return (t_id, title, artist, stars)
 
-    def _populate_all(self):
-        table_lib = self.query_one("#table-library", DataTable)
-        table_lib.clear()
-        for t in self.bridge.get_library():
-            table_lib.add_row(*self._format_row(t))
-
-        table_que = self.query_one("#table-queue", DataTable)
-        table_que.clear()
-        for t in self.bridge.get_queue():
-            table_que.add_row(*self._format_row(t))
+    def _populate_initial(self):
+        """Poblado único de las tres tablas al arrancar."""
+        self._repaint_table("#table-library", self.bridge.get_library())
+        self._repaint_table("#table-queue", self.bridge.get_queue())
 
         table_dir = self.query_one("#table-directories", DataTable)
         table_dir.clear()
         for d in self.bridge.get_directories():
             table_dir.add_row(Text(d["Directorio"], style="#FFFFFF"), Text(d["Existe"], style="#00FFFF"))
 
+    def _repaint_table(self, table_id: str, tracks):
+        """Reconstruye una tabla de pistas preservando la fila del cursor."""
+        table = self.query_one(table_id, DataTable)
+        cursor = table.cursor_row
+        table.clear()
+        for t in tracks:
+            table.add_row(*self._format_row(t))
+        if cursor is not None and 0 <= cursor < len(table.rows):
+            table.move_cursor(row=cursor)
+
     def update_ui(self):
-        track = self.bridge.get_current_track()
-        self.query_one("#bottom-bar", PlayerBottomBar).update_status(
-            track, self.bridge.is_playing(), self.bridge.get_progress()
-        )
-        self.query_one("#info-panel", InfoPanel).update_info(track)
+        """
+        Lectura PASIVA del estado: consulta al bridge y pinta.
+        No toma decisiones; solo refresca lo que realmente cambió.
+        """
+        bridge = self.bridge
+        track   = bridge.get_current_track()
+        playing = bridge.is_playing()
 
-        curr_version = self.bridge.get_queue_version()
-        if curr_version != self.last_queue_version:
-            self.last_queue_version = curr_version
-            table_que = self.query_one("#table-queue", DataTable)
-            table_que.clear()
-            for t in self.bridge.get_queue():
-                table_que.add_row(*self._format_row(t))
+        bar = self.query_one("#bottom-bar", PlayerBottomBar)
 
+        # Progreso: barata y debe avanzar continuamente.
+        bar.update_progress(track, bridge.get_progress())
+
+        # Título/estado e info lateral: solo cuando cambian (evita reparsear markup).
+        track_id = track.id if track else None
+        if track_id != self._last_track_id or playing != self._last_playing:
+            self._last_track_id = track_id
+            self._last_playing  = playing
+            bar.update_track(track, playing)
+            self.query_one("#info-panel", InfoPanel).update_info(track)
+
+        # Tablas: reconstruir solo si su versión cambió realmente.
+        qv = bridge.get_queue_version()
+        if qv != self.last_queue_version:
+            self.last_queue_version = qv
+            self._repaint_table("#table-queue", bridge.get_queue())
+
+        lv = bridge.get_library_version()
+        if lv != self.last_library_version:
+            self.last_library_version = lv
+            self._repaint_table("#table-library", bridge.get_library())
+
+        # Sincronizar cursor de la cola con la pista en reproducción.
         if self.active_tab == "queue" and track:
             table = self.query_one("#table-queue", DataTable)
-            curr_idx = self.bridge.get_current_index()
+            curr_idx = bridge.get_current_index()
             if 0 <= curr_idx < len(table.rows):
                 table.move_cursor(row=curr_idx)
 

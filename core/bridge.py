@@ -7,23 +7,22 @@
 # ==========================================
 
 from core.backend import MockBackend
-from core.cava import CavaSubprocess
 
 
 class MusicBridge:
     """
-    Fachada de acceso único al backend.
+    Fachada pura (Facade Pattern) entre el frontend y el backend.
 
-    Política de diseño:
-    - El frontend solo puede invocar comandos a través de aquí.
-    - Oculta completamente la implementación interna del backend.
-    - get_audio_bars() delega al generador espectral nativo del backend,
-      eliminando cualquier dependencia de CAVA u otro subproceso externo.
+    Política de diseño — capa de abstracción intermedia y SIN lógica propia:
+    - Traduce señales de la UI en comandos del backend.
+    - Recibe las estructuras de datos crudas del backend y las entrega tal cual.
+    - No posee estado ni recursos: ni audio, ni hilos, ni CAVA. Todo eso vive
+      en el backend. Cuando este se reescriba en C++, solo cambia `self.backend`;
+      esta fachada permanece idéntica.
     """
 
     def __init__(self):
         self.backend = MockBackend()
-        self.cava = CavaSubprocess()
 
     # ── Controles de reproducción ────────────────────────────────────────
     def play(self):                  self.backend.play()
@@ -39,10 +38,15 @@ class MusicBridge:
     def get_current_index(self):     return self.backend.current_index
     def jump_to_index(self, index):  self.backend.jump_to_queue_index(index)
 
+    # ── Comandos de alto nivel (la UI solo manda pestaña + fila) ──────────
+    def play_selection(self, tab, row):        self.backend.play_selection(tab, row)
+    def rate_selection(self, tab, row, stars): self.backend.rate_selection(tab, row, stars)
+
     # ── Biblioteca y cola ────────────────────────────────────────────────
     def get_library(self):           return self.backend.library
     def get_queue(self):             return self.backend.queue
     def get_queue_version(self):     return self.backend.queue_version
+    def get_library_version(self):   return self.backend.library_version
     def get_directories(self):       return self.backend.get_directories()
 
     # ── Configuración ────────────────────────────────────────────────────
@@ -50,24 +54,10 @@ class MusicBridge:
     def is_random_mode(self):        return self.backend.is_random_mode
     def set_rating(self, track_id, stars): self.backend.set_rating(track_id, stars)
 
-    # ── Espectro visual (reemplaza get_cava_data) ────────────────────────
+    # ── Espectro visual ──────────────────────────────────────────────────
     def get_audio_bars(self, num_bars: int) -> list[float]:
-        """
-        Delega al generador espectral CAVA nativo.
-
-        Si el reproductor está en pausa o no hay pista activa, retorna
-        directamente una lista de ceros, garantizando que el
-        visualizador decaiga a silencio sin latencia adicional.
-
-        Args:
-            num_bars: número de barras que solicita el widget visualizador.
-
-        Returns:
-            Lista de floats en [0.0, 1.0] con la energía por banda.
-        """
-        if not self.is_playing():
-            return [0.0] * num_bars
-        return self.cava.get_data(num_bars)
+        """Entrega el espectro calculado por el backend (que posee CAVA)."""
+        return self.backend.get_audio_bars(num_bars)
 
     def get_acoustic_dna(self) -> dict:
         """Huella acústica de la pista activa (semilla, perfil, color ambiental)."""

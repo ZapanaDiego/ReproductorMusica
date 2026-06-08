@@ -22,10 +22,8 @@ class InputController:
             self.bridge.toggle_play()
         elif key == "left":
             self.bridge.prev()
-            self.ui_app.force_queue_repaint()
         elif key == "right":
             self.bridge.next()
-            self.ui_app.force_queue_repaint()
         elif key == "r":
             is_rand = self.bridge.toggle_random()
             self.ui_app.notify_random_mode(is_rand)

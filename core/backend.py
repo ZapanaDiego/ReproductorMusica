@@ -8,12 +8,12 @@
 
 import os
 import json
-import math
 import time
 import random
 import threading
 from pathlib import Path
 from core.logger import get_logger
+from core.cava import CavaSubprocess
 
 logger = get_logger("Backend")
 
@@ -73,9 +73,14 @@ class MockBackend:
         self.is_playing     = False
         self.progress       = 0.0
         self.queue_version  = 0
+        self.library_version = 0
 
         self._lock      = threading.Lock()
         self.db_path    = "library.json"
+
+        # El backend es el ÚNICO dueño del analizador espectral.
+        # La UI nunca conoce CAVA; solo pide barras al backend vía bridge.
+        self._cava = CavaSubprocess()
 
         self._init_library()
         self.is_random_mode = False
@@ -211,14 +216,18 @@ class MockBackend:
         else:
             self.play()
 
+    def _next_track_locked(self):
+        """Avanza a la siguiente pista. Requiere que el lock ya esté tomado."""
+        if self.queue:
+            self.current_index = (self.current_index + 1) % len(self.queue)
+            self.progress      = 0.0
+            self.is_playing    = True
+            self._play_current_real()
+
     def next_track(self):
         with self._lock:
-            if self.queue:
-                self.current_index = (self.current_index + 1) % len(self.queue)
-                self.progress      = 0.0
-                self.is_playing    = True
-                logger.info("Salto a pista SIGUIENTE.")
-                self._play_current_real()
+            logger.info("Salto a pista SIGUIENTE.")
+            self._next_track_locked()
 
     def prev_track(self):
         with self._lock:
@@ -246,10 +255,38 @@ class MockBackend:
             target.stars = stars
             logger.info(f"Rating actualizado: Pista {track_id} -> {stars} Estrellas.")
             self._save_library()
-            self.queue_version += 1
+            self.library_version += 1
+            self.queue_version   += 1
             for t in self.queue:
                 if t.id == track_id:
                     t.stars = stars
+
+    # -----------------------------------------------------------------------
+    # COMANDOS DE ALTO NIVEL PARA LA UI
+    # El frontend solo envía (pestaña, fila); el backend resuelve la lógica.
+    # -----------------------------------------------------------------------
+
+    def play_selection(self, tab: str, row: int):
+        """Reproduce la pista seleccionada en la pestaña indicada."""
+        if tab == "queue":
+            self.jump_to_queue_index(row)
+        elif tab == "library":
+            if 0 <= row < len(self.library):
+                track_id = self.library[row].id
+                for i, t in enumerate(self.queue):
+                    if t.id == track_id:
+                        self.jump_to_queue_index(i)
+                        break
+
+    def rate_selection(self, tab: str, row: int, stars: int):
+        """Califica la pista seleccionada en la pestaña indicada."""
+        track = None
+        if tab == "library" and 0 <= row < len(self.library):
+            track = self.library[row]
+        elif tab == "queue" and 0 <= row < len(self.queue):
+            track = self.queue[row]
+        if track:
+            self.set_rating(track.id, stars)
 
     # -----------------------------------------------------------------------
     # BUCLE DE PROGRESO DE REPRODUCCIÓN
@@ -270,10 +307,7 @@ class MockBackend:
                     self.progress   += dt
 
                     if self.progress >= current_track.duration:
-                        self.progress = 0.0
-                        self._lock.release()
-                        self.next_track()
-                        self._lock.acquire()
+                        self._next_track_locked()
 
     # Paleta nocturna compartida con la UI (una atmósfera por perfil de ADN).
     AMBIENT_PALETTE = ("#0c0014", "#001014", "#001408")
@@ -330,33 +364,13 @@ class MockBackend:
 
     def get_audio_bars(self, num_bars: int) -> list[float]:
         """
-        Espectro rítmico bass-centric: un único pulso ``beat_impact`` sincroniza
-        todo el ecualizador. Picos afilados hasta 1.0; sin ondas sinusoidales
-        independientes que aplanen la energía.
+        Espectro real de la pista activa.
+
+        El backend es el único dueño del analizador: delega al subproceso CAVA
+        que posee internamente. Si está en pausa o no hay pista, retorna ceros
+        de inmediato (sin tocar CAVA), lo que permite a la UI saltarse por
+        completo el renderizado durante el silencio.
         """
-        track = self.get_current_track()
-        if not self.is_playing or track is None:
+        if not self.is_playing or self.get_current_track() is None:
             return [0.0] * num_bars
-
-        seed = self._acoustic_seed_from_track(track)
-        bpm_hz = (80 + (seed * 17) % 80) / 60.0
-        t = time.time()
-
-        # Pulso de bajo: subida/caida rápida, pico exacto en 1.0.
-        beat_impact = math.pow(abs(math.sin(t * bpm_hz * math.pi)), 4)
-
-        bass_end = max(1, int(num_bars * 0.40))
-        bars: list[float] = []
-
-        for i in range(num_bars):
-            if i < bass_end:
-                noise = ((seed + i * 13 + int(t * 60)) & 0xFF) / 255.0 * 0.08
-                value = min(1.0, beat_impact + noise)
-            else:
-                pos = (i - bass_end) / max(num_bars - bass_end - 1, 1)
-                fraction = 0.85 - pos * 0.55
-                value = beat_impact * max(0.15, fraction)
-
-            bars.append(max(0.0, min(1.0, value)))
-
-        return bars
+        return self._cava.get_data(num_bars)

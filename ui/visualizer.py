@@ -150,8 +150,12 @@ class CavaVisualizer(Static):
         self._row_styles: list[str] = self._build_row_styles(max(h, 1))
         self._cached_h: int = h
 
+        # Cuando todo decae a cero y no hay reproducción, el render W×H se
+        # omite por completo: ahorra el 100% del coste del visualizador en pausa.
+        self._silent = False
+
         self.frame_count = 0
-        self.set_interval(0.03, self.update_visualizer)
+        self.set_interval(0.04, self.update_visualizer)
 
     @staticmethod
     def _build_row_styles(h: int) -> list[str]:
@@ -191,6 +195,16 @@ class CavaVisualizer(Static):
           7.  Render con run-length batching.
           8.  Envío a Textual.
         """
+
+        # ── 0. CORTOCIRCUITO DE SILENCIO ─────────────────────────────────────
+        # Si el backend no reproduce y ya pintamos el frame en negro, no hay
+        # nada que animar: salimos antes del bucle W×H (el hot path más caro).
+        playing = self.app.bridge.is_playing()
+        if not playing:
+            if self._silent:
+                return
+        else:
+            self._silent = False
 
         # ── 1. DIMENSIONES ───────────────────────────────────────────────────
         w, h = self.size.width, self.size.height
@@ -366,9 +380,15 @@ class CavaVisualizer(Static):
         # ── 8. ENVIAR A TEXTUAL ───────────────────────────────────────────────
         self.update(join_char.join(lines))
 
-        # ── TELEMETRÍA (cada 30 frames ≈ 1 s) ───────────────────────────────
+        # ── ARMADO DEL CORTOCIRCUITO DE SILENCIO ─────────────────────────────
+        # Este frame ya quedó en negro y todo decayó: el siguiente tick saldrá
+        # de inmediato sin recorrer el bucle W×H hasta que vuelva la música.
+        if not playing and peak_global < 0.002 and max(peaks) < 0.002:
+            self._silent = True
+
+        # ── TELEMETRÍA (cada 90 frames ≈ 3.6 s) ──────────────────────────────
         self.frame_count += 1
-        if self.frame_count % 30 == 0:
+        if self.frame_count % 90 == 0:
             r, g, b_ch = int(_clamp255(bg[0])), int(_clamp255(bg[1])), int(_clamp255(bg[2]))
             logger.info(
                 f"Bass={bass_avg:.2f} Mid={mid_avg:.2f} High={high_avg:.2f} "
