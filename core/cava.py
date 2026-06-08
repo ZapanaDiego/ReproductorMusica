@@ -26,17 +26,19 @@ class CavaSubprocess:
     def _start_cava(self):
         config = f"""
 [general]
+framerate = 60
 bars = {self.bars}
-framerate = 100
+autosens = 1
 
 [smoothing]
 monstercat = 1
-gravity = 140
+gravity = 150
+ignore = 0
 
 [output]
 method = raw
-raw_target = /dev/stdout
 data_format = ascii
+raw_target = /dev/stdout
 ascii_max_range = 1000
 """
         try:
