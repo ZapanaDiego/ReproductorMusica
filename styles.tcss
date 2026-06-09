@@ -178,7 +178,7 @@ ProgressBar {
 
 Bar > .bar--bar {
     /* Fondo vacío de la barra: negro translúcido */
-    color: rgba(0, 0, 0, 0.50);
+    color: #37dbfc;
 }
 
 Bar > .bar--complete {
