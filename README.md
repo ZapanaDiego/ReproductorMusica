@@ -1,5 +1,3 @@
-# README.md
-
 ## 1. 🎵 DESCRIPCIÓN GENERAL Y FLUJO DE EJECUCIÓN
 
 Este proyecto es un **reproductor de música optimizado para terminal** construido sobre **Textual** y **Rich**, con una arquitectura preparada para separar estrictamente la interfaz de usuario del núcleo lógico de reproducción. La aplicación combina una TUI reactiva, tablas navegables, barra de progreso, panel de metadatos y un visualizador espectral estilo ecualizador, manteniendo la lógica crítica concentrada en `core/backend.py`.
