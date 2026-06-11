@@ -11,6 +11,14 @@ El diseño actual busca dos objetivos principales:
 
 La interfaz gráfica corre en Python, pero la lógica real de estado, cola, reproducción, saltos, progreso, calificación y análisis espectral debe permanecer centralizada detrás del bridge. Esto permite que, en una fase posterior, `backend.py` sea reemplazado por un módulo nativo compilado sin reescribir la UI.
 
+### Ejecuciòn del programa
+Primero tienes que asegurate que tienes descargado python la verciòn màs reciente y ejecutar en la terminal esto:
+
+```bash
+chmod +x main.py                                          
+./main.py
+```
+
 ### Ciclo de vida de ejecución
 
 El ciclo completo empieza cuando se ejecuta:
