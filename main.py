@@ -6,6 +6,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Label, ContentSwitcher, DataTable
+from pathlib import Path
 
 from core.bridge import MusicBridge
 from core.input import InputController
@@ -15,7 +16,7 @@ from ui.player import PlayerBottomBar
 from ui.info_panel import InfoPanel
 
 class MusicPlayerApp(App):
-    CSS_PATH = "styles.tcss"
+    CSS_PATH = Path("styles.tcss")
 
     def __init__(self):
         super().__init__()

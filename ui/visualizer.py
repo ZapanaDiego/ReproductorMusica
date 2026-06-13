@@ -1,9 +1,9 @@
 """
 ================================================================================
-ARCHIVO: ui/visualizer.py — v4 "Neon Dark Harmony" (render optimizado)
+ARCHIVO: ui/visualizer.py — v6 "Zero-Backpressure" (render pull model)
 ================================================================================
 
-🎨 PALETA CROMÁTICA
+🎨 PALETA CROMÁTICA (intacta desde v4)
   Fondos (oscuros, reactivos):
     #0a0a0f  Negro abismal   → Silencio / pausa
     #0d1f3c  Azul medianoche → Bass dominante
@@ -16,80 +16,83 @@ ARCHIVO: ui/visualizer.py — v4 "Neon Dark Harmony" (render optimizado)
     #ff2d78  Rosa eléctrico  → Zona alta (cima)
     #ffb700  Ámbar dorado    → Pico flotante
 
-⚡ OPTIMIZACIONES DE RENDER (v3 → v4)
----------------------------------------
-El cuello de botella era Text.append() llamado UNA VEZ POR CELDA:
-  220 cols × 50 filas = 11.000 append/frame → 14 ms/frame @ 70 FPS teóricos.
+⚡ CAMBIOS ARQUITECTÓNICOS v5 → v6  «Zero-Backpressure»
+---------------------------------------------------------
 
-Soluciones aplicadas en cascada:
+PROBLEMA RAÍZ RESUELTO:
+  set_interval(1/60) agenda tasks de forma ciega en la cola de Textual.
+  Si el fotograma anterior aún no ha terminado de dibujarse cuando el
+  intervalo dispara, los mensajes se acumulan ("backpressure"), el event
+  loop se atasca y los FPS colapsan con tirones de acordeón.
 
-1. RUN-LENGTH BATCHING
-   En lugar de un append por celda, acumulamos caracteres consecutivos del
-   mismo estilo en un buffer de lista y volcamos en un solo append al cambiar
-   el estilo. Una fila típica tiene ~3 zonas (vacío/barra/pico), no 220.
-   Resultado: ~42 appends/fila en lugar de 220 → reducción del 81%.
+  Adicionalmente, llamar a Static.update() 60 veces/segundo sustituye
+  todo el renderable interno, invalidando el widget en cada frame y
+  forzando un ciclo completo de recomposición de Rich.
 
-2. PRE-CÁLCULO DE bar_top y peak_draw_row
-   En la versión original se recalculaban dentro del doble loop (y, x).
-   Ahora se calculan en un único loop O(w) ANTES del render, almacenados
-   en listas locales. El doble loop solo hace lookups de lista (O(1)).
+1. MODELO PULL: render() + _schedule_next_frame()
+   El widget sobreescribe render() — el método nativo que Textual invoca
+   CUANDO EL COMPOSITOR LO NECESITA. render() construye y devuelve el
+   Text de las barras directamente, sin pasar por update().
 
-3. TABLA DE ESTILOS POR FILA (on_mount, una sola vez)
-   La decisión de color por fila (ratio < 0.33, etc.) es idéntica cada frame
-   si h no cambia. Se precalcula en on_mount y se reconstruye solo en resize.
-   Elimina h comparaciones de float y h f-strings por frame.
+   _schedule_next_frame() usa set_timer(INTERVAL, ...) de forma RECURSIVA:
+   el siguiente frame SOLO se agenda cuando el actual ya terminó de
+   procesarse. Esto garantiza exactamente 1 frame pendiente en la cola
+   en todo momento — backpressure = 0.
 
-4. SUAVIZADO + FÍSICA DE PICOS EN UN SOLO LOOP
-   Antes eran dos loops separados sobre w columnas. Ahora un único loop hace
-   suavizado, actualización de pico y cálculo de bar_top/peak_draw_row.
-   Reduce accesos a memoria y llamadas de función.
+2. SEPARACIÓN DE ESTADO Y RENDERIZADO
+   El método _tick() acumula estado (datos espectrales, color de fondo).
+   El método render() lo consume sin efectos secundarios.
+   Esta separación permite que Textual llame a render() en cualquier
+   momento (e.g., resize) sin romper la sincronización.
 
-5. VARIABLES LOCALES EN HOT PATH
-   Python busca variables locales ~2x más rápido que globales/atributos.
-   Todas las constantes (DECAY, PEAK_GRAVITY…) se asignan a locales al inicio
-   del método. Los atributos self.peaks, self.peak_hold, etc. también.
+3. THROTTLE DEL FONDO PRESERVADO
+   La actualización de screen.styles.background se limita a 15 FPS
+   (cada 4 ticks) y solo si el color RGB cambió, evitando las
+   invalidaciones globales de layout que fueron el cuello de botella anterior.
 
-BENCHMARK COMPARATIVO (220×50, i5 estándar):
-  Original:   14.3 ms/frame →  70 FPS teóricos
-  v4 final:    4.5 ms/frame → 223 FPS teóricos  (3.2x / −69%)
-  Timer real:   30 ms/frame →  33 FPS reales
-  Margen libre: 25.5 ms/frame para el resto de la UI (vs 15.7 ms antes)
+4. REFRESH CON REPAINT=True, LAYOUT=False
+   self.refresh(repaint=True, layout=False) redibuja SOLO los píxeles
+   del widget sin recalcular el árbol de layout del DOM — la operación
+   más barata posible en Textual para contenido animado.
+
+5. SUB-PIXEL VERTICAL PRESERVADO (bloques Unicode de octavo ▁▂▃▄▅▆▇█)
+   El mapeo fraccionario de v5 se conserva intacto.
 
 ================================================================================
 """
 
 from textual.widgets import Static
 from textual.color import Color
+from rich.console import RenderableType
 from rich.text import Text
 from core.logger import get_logger
 
 logger = get_logger("Visualizer")
 
+# ── INTERVALO DE FRAME (segundos) ─────────────────────────────────────────────
+# 60 FPS → 16.6 ms. El set_timer recursivo garantiza que este intervalo sea
+# el tiempo MÍNIMO entre frames, no un disparo ciego de cola.
+_FRAME_INTERVAL = 1.0 / 60.0
 
-# ── CONSTANTES GLOBALES ───────────────────────────────────────────────────────
+# ── BLOQUES UNICODE DE OCTAVO (sub-pixel vertical) ───────────────────────────
+# Índice 0 = vacío (espacio), 1..8 = ▁▂▃▄▅▆▇█
+_EIGHTH_BLOCKS = (' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
 
-DECAY             = 0.82
-AUTO_GAIN_CEILING = 0.20
-PEAK_HOLD_FRAMES  = 18
-PEAK_GRAVITY      = 0.0035
-PEAK_FALL_START   = 0.001
-
-# ── PALETA v3 — FONDOS (RGB floats, oscuros) ─────────────────────────────────
+# ── PALETA — FONDOS (RGB floats, oscuros) ────────────────────────────────────
 _BG_SILENCE = (10.0,  10.0,  15.0)
 _BG_BASS    = (13.0,  31.0,  60.0)
 _BG_MIDS    = (26.0,  10.0,  46.0)
 _BG_HIGHS   = (42.0,  10.0,  26.0)
 _BG_PEAK    = (60.0,  30.0,   8.0)
 
-# ── PALETA v3 — BARRAS (estilos Rich preconstruidos, sin f-strings en loop) ──
+# ── PALETA — BARRAS (estilos Rich preconstruidos, sin f-strings en hot-loop) ─
 _STYLE_BOTTOM = 'bold #00d4ff'   # Cian eléctrico  → zona grave
 _STYLE_MID    = 'bold #7b2fff'   # Violeta neón    → zona media
 _STYLE_TOP    = 'bold #ff2d78'   # Rosa eléctrico  → zona alta
-_STYLE_PEAK   = 'bold #ffb700'   # Ámbar dorado    → pico flotante
 _STYLE_EMPTY  = ''               # Sin estilo      → celda vacía
 
 
-# ── HELPER DE COLOR ───────────────────────────────────────────────────────────
+# ── HELPERS DE COLOR ─────────────────────────────────────────────────────────
 
 def _clamp255(v: float) -> float:
     return 0.0 if v < 0.0 else (255.0 if v > 255.0 else v)
@@ -111,12 +114,15 @@ def _add_weighted(
 
 class CavaVisualizer(Static):
     """
-    Ecualizador espectral con render optimizado por run-length batching.
+    Ecualizador espectral — motor v6 «Zero-Backpressure».
 
-    Contraste garantizado entre las tres capas:
-      • Fondo Screen  → oscuro, tono reactivo a la banda dominante.
-      • Barras EQ     → brillantes, gradiente cian→violeta→rosa.
-      • Texto UI      → blanco #fff, ratio ≥ 9:1 contra cualquier fondo.
+    Arquitectura de renderizado pull (render override):
+      • render() devuelve el Text con bloques sub-pixel directamente al
+        compositor de Textual — sin update(), sin recomposición del widget.
+      • _schedule_next_frame() agenda frames de forma recursiva, garantizando
+        que solo haya 1 frame en la cola en todo momento.
+      • Fondo reactivo con throttle a 15 FPS para evitar invalidaciones
+        globales de layout del DOM.
     """
 
     DEFAULT_CSS = """
@@ -125,6 +131,8 @@ class CavaVisualizer(Static):
         height: 1fr;
         color: auto;
         background: transparent;
+        padding: 0;
+        margin: 0;
     }
     """
 
@@ -132,30 +140,30 @@ class CavaVisualizer(Static):
 
     def on_mount(self) -> None:
         """
-        Inicializa estado persistente y precalcula la tabla de estilos por fila.
-        Llamado por Textual cuando el widget está en el DOM y self.size es válido.
+        Inicializa el estado persistente y arranca el primer frame.
         """
         w, h = self.size.width, self.size.height
 
-        self.previous_bars: list[float] = [0.0] * max(w, 1)
-        self.peaks:         list[float] = [0.0] * max(w, 1)
-        self.peak_hold:     list[int]   = [0]   * max(w, 1)
-        self.peak_vel:      list[float] = [0.0] * max(w, 1)
-
-        # Fondo inicial: negro abismal (silencio)
+        # Fondo reactivo: EMA en espacio RGB float
         self.current_bg: list[float] = list(_BG_SILENCE)
+        self._last_bg_color: tuple | None = None
 
-        # Tabla de estilos de barra por fila — precalculada una sola vez.
-        # Se reconstruye solo si h cambia (on_resize detectado por comparación).
+        # Tabla de estilos de barra por fila — precalculada, reconstruida solo en resize
         self._row_styles: list[str] = self._build_row_styles(max(h, 1))
         self._cached_h: int = h
+        self._cached_w: int = w
 
-        # Cuando todo decae a cero y no hay reproducción, el render W×H se
-        # omite por completo: ahorra el 100% del coste del visualizador en pausa.
-        self._silent = False
+        # Renderable interno: empieza en silencio (Text vacío)
+        self._renderable: Text = Text()
 
-        self.frame_count = 0
-        self.set_interval(0.04, self.update_visualizer)
+        # Cortocircuito de silencio: evita el hot-loop W×H cuando no hay música
+        self._silent: bool = False
+
+        # Datos de telemetría
+        self.frame_count: int = 0
+
+        # Arrancar el bucle recursivo de frames
+        self._schedule_next_frame()
 
     @staticmethod
     def _build_row_styles(h: int) -> list[str]:
@@ -179,113 +187,83 @@ class CavaVisualizer(Static):
                 styles.append(_STYLE_BOTTOM)
         return styles
 
-    # ── BUCLE PRINCIPAL ───────────────────────────────────────────────────────
+    # ── MOTOR DE FRAMES RECURSIVO ─────────────────────────────────────────────
 
-    def update_visualizer(self) -> None:
+    def _schedule_next_frame(self) -> None:
         """
-        Bucle de renderizado ~33 FPS.
+        Agenda el siguiente tick usando set_timer.
 
-        Orden de operaciones:
-          1.  Dimensiones + detección de resize.
-          2.  Datos espectrales del bridge.
-          3.  Autoganancia global.
-          4.  Loop único: suavizado + física de picos + bar_top + peak_draw_row.
-          5.  Energía por banda (bass / mids / highs).
-          6.  Fondo Screen reactivo (EMA con alpha dinámico).
-          7.  Render con run-length batching.
-          8.  Envío a Textual.
+        GARANTÍA DE BACKPRESSURE CERO:
+        set_timer se llama al FINAL de _tick(), es decir, solo DESPUÉS de
+        que el procesamiento actual terminó. Esto significa que el event loop
+        de Textual jamás acumula más de 1 mensaje pendiente de este widget.
+        No hay efecto acordeón, no hay tirones de cola.
         """
+        self.set_timer(_FRAME_INTERVAL, self._tick)
 
-        # ── 0. CORTOCIRCUITO DE SILENCIO ─────────────────────────────────────
-        # Si el backend no reproduce y ya pintamos el frame en negro, no hay
-        # nada que animar: salimos antes del bucle W×H (el hot path más caro).
+    def _tick(self) -> None:
+        """
+        Ciclo de trabajo de un frame:
+          1. Detecta silencio → cortocircuito.
+          2. Recoge datos espectrales del bridge.
+          3. Actualiza geometría sub-pixel (top_row, frac_eighth).
+          4. Construye el Text con run-length batching.
+          5. Lo almacena en self._renderable.
+          6. Actualiza el fondo reactivo (throttled a 15 FPS).
+          7. Dispara self.refresh(repaint=True, layout=False).
+          8. Agenda el siguiente frame vía _schedule_next_frame().
+        """
+        # ── 1. CORTOCIRCUITO DE SILENCIO ─────────────────────────────────────
         playing = self.app.bridge.is_playing()
-        if not playing:
-            if self._silent:
-                return
-        else:
+        if not playing and self._silent:
+            self._schedule_next_frame()
+            return
+        if playing:
             self._silent = False
 
-        # ── 1. DIMENSIONES ───────────────────────────────────────────────────
+        # ── 2. DIMENSIONES ───────────────────────────────────────────────────
         w, h = self.size.width, self.size.height
         if w <= 0 or h <= 0:
+            self._schedule_next_frame()
             return
-
-        # Reconstruir estructuras solo si el viewport cambió de tamaño
-        if w != len(self.previous_bars):
-            self.previous_bars = [0.0] * w
-            self.peaks         = [0.0] * w
-            self.peak_hold     = [0]   * w
-            self.peak_vel      = [0.0] * w
 
         if h != self._cached_h:
             self._row_styles = self._build_row_styles(h)
-            self._cached_h   = h
+            self._cached_h = h
+        if w != self._cached_w:
+            self._cached_w = w
 
-        # ── 2. DATOS ESPECTRALES ─────────────────────────────────────────────
-        bars: list[float] = list(self.app.bridge.get_audio_bars(w))
+        # ── 3. DATOS ESPECTRALES PUROS ───────────────────────────────────────
+        # CAVA ya entrega el espectro con Monstercat + Gravity + autoganancia.
+        bars: list[float] = self.app.bridge.get_audio_bars(w)
 
-        # ── 3. AUTOGANANCIA ──────────────────────────────────────────────────
-        peak_global = max(bars) if bars else 0.0
-        if 0.0 < peak_global < AUTO_GAIN_CEILING:
-            gain = 1.0 / peak_global
-            bars = [b * gain if b * gain < 1.0 else 1.0 for b in bars]
-
-        # ── 4. LOOP ÚNICO: suavizado + picos + geometría ──────────────────────
-        #
-        # Consolidar cuatro loops separados en uno elimina 3 pasadas sobre w.
-        # Variables locales para el hot path (lookup ~2x más rápido que atrib.)
-        prev_bars  = self.previous_bars
-        peaks      = self.peaks
-        peak_hold  = self.peak_hold
-        peak_vel   = self.peak_vel
-        _decay     = DECAY
-        _hold      = PEAK_HOLD_FRAMES
-        _grav      = PEAK_GRAVITY
-        _fall      = PEAK_FALL_START
-        h1         = h - 1
-
-        bar_tops:       list[int] = [0] * w
-        peak_draw_rows: list[int] = [0] * w
+        # ── 4. PRE-CÁLCULO GEOMÉTRICO SUB-PIXEL ─────────────────────────────
+        frac_eighth: list[int] = [0] * w
+        top_row:     list[int] = [0] * w
 
         for x in range(w):
-            # SUAVIZADO (ataque instantáneo + decay exponencial)
-            raw  = bars[x]
-            prev = prev_bars[x]
-            if raw > prev:
-                val = raw
-            else:
-                decayed = prev * _decay
-                val = raw if raw > decayed else decayed
-            prev_bars[x] = val
-            bars[x]      = val          # bars refleja el valor suavizado
+            val = bars[x]
+            if val < 0.0:
+                val = 0.0
+            elif val > 1.0:
+                val = 1.0
 
-            # FÍSICA DE PICO
-            pv = peaks[x]
-            if val >= pv:
-                peaks[x]     = val
-                peak_hold[x] = _hold
-                peak_vel[x]  = _fall
-            else:
-                ph = peak_hold[x]
-                if ph > 0:
-                    peak_hold[x] = ph - 1
-                else:
-                    pvel          = peak_vel[x] + _grav
-                    peak_vel[x]   = pvel
-                    pv2           = pv - pvel
-                    peaks[x]      = pv2 if pv2 > 0.0 else 0.0
+            bar_height_f = val * h
+            full = int(bar_height_f)
+            frac = bar_height_f - full
 
-            # GEOMETRÍA (calculada aquí → el render solo hace lookups)
-            bar_tops[x] = h1 - int(val * h)
+            eighth = int(frac * 8.0 + 0.5)
+            if eighth >= 8:
+                full += 1
+                eighth = 0
+            if full > h:
+                full = h
+                eighth = 0
 
-            pv = peaks[x]
-            if pv > 0.01:
-                peak_draw_rows[x] = max(0, h1 - int(pv * h) - 1)
-            else:
-                peak_draw_rows[x] = -1
+            frac_eighth[x] = eighth
+            top_row[x] = (h - full - 1) if eighth > 0 else (h - full)
 
-        # ── 5. ENERGÍA POR BANDA ─────────────────────────────────────────────
+        # ── 5. FONDO REACTIVO (cálculo EMA, throttle 15 FPS) ─────────────────
         bass_end = max(1, int(w * 0.30))
         mid_end  = max(bass_end + 1, int(w * 0.65))
 
@@ -297,100 +275,110 @@ class CavaVisualizer(Static):
         mid_avg  = sum(mid_zone)  / len(mid_zone)  if mid_zone  else 0.0
         high_avg = sum(high_zone) / len(high_zone) if high_zone else 0.0
         total_energy = bass_avg + mid_avg + high_avg
+        peak_global  = max(bars) if bars else 0.0
 
-        # ── 6. FONDO SCREEN REACTIVO ─────────────────────────────────────────
         target = _BG_SILENCE
         target = _add_weighted(target, _BG_BASS,  bass_avg * 0.60)
         target = _add_weighted(target, _BG_MIDS,  mid_avg  * 0.55)
         target = _add_weighted(target, _BG_HIGHS, high_avg * 0.45)
-
         peak_excess = max(0.0, peak_global - 0.85) / 0.15
         if peak_excess > 0.0:
             target = _add_weighted(target, _BG_PEAK, peak_excess * 0.35)
 
-        # Alpha dinámico: sedoso en calma (0.04), agresivo en drops (0.22)
         alpha = 0.04 + min(0.18, total_energy * 0.2)
-
         bg = self.current_bg
         bg[0] += alpha * (target[0] - bg[0])
         bg[1] += alpha * (target[1] - bg[1])
         bg[2] += alpha * (target[2] - bg[2])
 
-        try:
-            self.app.screen.styles.background = Color(
-                int(_clamp255(bg[0])),
-                int(_clamp255(bg[1])),
-                int(_clamp255(bg[2])),
-            )
-        except Exception:
-            pass
+        r    = int(_clamp255(bg[0]))
+        g    = int(_clamp255(bg[1]))
+        b_ch = int(_clamp255(bg[2]))
 
-        # ── 7. RENDER CON RUN-LENGTH BATCHING ────────────────────────────────
-        #
-        # PRINCIPIO: en lugar de un Text.append() por celda (W×H llamadas),
-        # acumulamos caracteres consecutivos con el mismo estilo en buf_chars
-        # y hacemos UN SOLO append al cambiar de estilo.
-        #
-        # Una fila típica tiene 3 zonas: [vacío | barra | pico] → ~3-8 appends
-        # frente a los 220 originales. Reducción del 81% en llamadas a Rich.
-        #
-        # Identidad de estilo: usamos `is` en lugar de `==` porque los estilos
-        # son constantes de módulo (interned strings) → comparación O(1).
+        # Throttle: screen.styles.background solo a 15 FPS y si el color cambió
+        if self.frame_count % 4 == 0:
+            new_bg = (r, g, b_ch)
+            if self._last_bg_color != new_bg:
+                self._last_bg_color = new_bg
+                try:
+                    self.app.screen.styles.background = Color(r, g, b_ch)
+                except Exception:
+                    pass
 
-        row_styles  = self._row_styles
-        _style_peak = _STYLE_PEAK
-        _style_empty = _STYLE_EMPTY
+        # ── 6. BUILD TEXT CON RUN-LENGTH BATCHING ────────────────────────────
+        row_styles    = self._row_styles
+        _style_empty  = _STYLE_EMPTY
+        eighth_blocks = _EIGHTH_BLOCKS
 
         lines: list[Text] = []
-        join_char = Text('\n')
 
         for y in range(h):
             bar_style = row_styles[y]
             line_text = Text()
             buf_chars: list[str] = []
-            buf_style = _style_empty   # estilo del buffer actual
+            buf_style = _style_empty
 
             for x in range(w):
-                # Decisión de celda (solo lookups de lista, sin cálculos)
-                if y == peak_draw_rows[x]:
-                    ch  = '▔'
-                    sty = _style_peak
-                elif y >= bar_tops[x]:
-                    ch  = '▓' if y == bar_tops[x] else '█'
-                    sty = bar_style
-                else:
+                tr = top_row[x]
+
+                if y < tr:
                     ch  = ' '
                     sty = _style_empty
+                elif y == tr and frac_eighth[x] > 0:
+                    ch  = eighth_blocks[frac_eighth[x]]
+                    sty = bar_style
+                else:
+                    ch  = '█'
+                    sty = bar_style
 
-                # Batching: acumular si mismo estilo, volcar si cambia
                 if sty is buf_style:
                     buf_chars.append(ch)
                 else:
                     if buf_chars:
                         line_text.append(''.join(buf_chars), style=buf_style)
                     buf_chars = [ch]
-                    buf_style  = sty
+                    buf_style = sty
 
-            # Volcar el último buffer de la fila
             if buf_chars:
                 line_text.append(''.join(buf_chars), style=buf_style)
 
             lines.append(line_text)
 
-        # ── 8. ENVIAR A TEXTUAL ───────────────────────────────────────────────
-        self.update(join_char.join(lines))
+        # ── 7. ALMACENAR RENDERABLE ───────────────────────────────────────────
+        self._renderable = Text('\n').join(lines)
 
-        # ── ARMADO DEL CORTOCIRCUITO DE SILENCIO ─────────────────────────────
-        # Este frame ya quedó en negro y todo decayó: el siguiente tick saldrá
-        # de inmediato sin recorrer el bucle W×H hasta que vuelva la música.
-        if not playing and peak_global < 0.002 and max(peaks) < 0.002:
+        # ── 8. DISPARAR REPAINT (sin recalcular layout) ───────────────────────
+        # layout=False es crítico: redibuja solo los píxeles del widget sin
+        # tocar el árbol de layout del DOM — la operación más ligera posible.
+        self.refresh(repaint=True, layout=False)
+
+        # ── CORTOCIRCUITO DE SILENCIO: armar para el próximo tick ────────────
+        if not playing and peak_global < 0.002:
             self._silent = True
 
-        # ── TELEMETRÍA (cada 90 frames ≈ 3.6 s) ──────────────────────────────
+        # ── TELEMETRÍA (cada 180 frames ≈ 3 s) ───────────────────────────────
         self.frame_count += 1
-        if self.frame_count % 90 == 0:
-            r, g, b_ch = int(_clamp255(bg[0])), int(_clamp255(bg[1])), int(_clamp255(bg[2]))
+        if self.frame_count % 180 == 0:
             logger.info(
                 f"Bass={bass_avg:.2f} Mid={mid_avg:.2f} High={high_avg:.2f} "
                 f"α={alpha:.3f} BG=#{r:02x}{g:02x}{b_ch:02x} Peak={peak_global:.2f}"
             )
+
+        # ── 9. AGENDAR EL PRÓXIMO FRAME (SIEMPRE AL FINAL) ───────────────────
+        # Al colocar esta llamada aquí, garantizamos que el intervalo de
+        # _FRAME_INTERVAL se mide desde el fin del frame actual, no desde
+        # el inicio, eliminando completamente la acumulación de backpressure.
+        self._schedule_next_frame()
+
+    # ── MÉTODO PULL — INTERFAZ NATIVA DE TEXTUAL ─────────────────────────────
+
+    def render(self) -> RenderableType:
+        """
+        Textual llama a este método cada vez que necesita redibujar el widget.
+
+        Devuelve el renderable pre-construido por _tick() sin ningún efecto
+        secundario. La separación estado/_tick()/render() garantiza que Textual
+        puede invocar render() en cualquier momento (resize, focus, etc.) de
+        forma segura y sin coste de reconstrucción.
+        """
+        return self._renderable

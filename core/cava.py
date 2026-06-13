@@ -25,42 +25,66 @@ class CavaSubprocess:
         self._start_cava()
 
     def _start_cava(self):
-        config = f"""
-[general]
-framerate = 30
-bars = {self.bars}
-autosens = 1
+        import platform
+        import os
 
-[smoothing]
-monstercat = 1
-gravity = 150
-ignore = 0
+        # 1. Detección ESTRICTA (Sin buscar archivos para evitar falsos positivos en Linux)
+        is_windows = platform.system() == "Windows" or os.name == "nt"
 
-[output]
-method = raw
-raw_target = /dev/stdout
-data_format = binary
-bit_format = 8bit
-"""
+        # 2. El target de salida binaria varía ligeramente según el sistema
+        raw_target = "stdout" if is_windows else "/dev/stdout"
+
+        config_lines = [
+            "[general]",
+            "framerate = 30",
+            f"bars = {self.bars}",
+            "autosens = 1",
+            "",
+            "[smoothing]",
+            "monstercat = 1",
+            "gravity = 150",
+            "ignore = 0",
+            "",
+            "[output]",
+            "method = raw",
+            "raw_target = " + raw_target,
+            "data_format = binary",
+            "bit_format = 8bit"
+        ]
+
+        # 3. Inyección WASAPI Loopback solo si estamos verdaderamente en Windows
+        if is_windows:
+            config_lines.insert(0, "[input]\nmethod = wasapi\nsource = loopback\n")
+
+        config = "\n".join(config_lines)
+
         try:
-            # Crear configuración temporal
             fd, path = tempfile.mkstemp(suffix='.conf', prefix='cava_')
-            with os.fdopen(fd, 'w') as f:
+            
+            # 4. Escribir y CERRAR explícitamente el archivo para evitar bloqueos en Windows
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(config)
             
-            # Lanzar el subproceso real (sin text=True para leer binario)
+            # --- AQUÍ EL ARCHIVO YA ESTÁ CERRADO Y LIBRE ---
+
+            cava_exe = './cava.exe' if is_windows else 'cava'
+            
+            entorno = "WINDOWS (WASAPI Activado)" if is_windows else "LINUX (Nativo)"
+            logger.info(f"Lanzando CAVA en modo: {entorno}")
+            logger.info(f"Configuración inyectada:\n{config}")
+            
+            # 5. Lanzar el proceso de forma segura
             self.process = subprocess.Popen(
-                ['cava', '-p', path],
+                [cava_exe, '-p', path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL
             )
             self._running = True
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
-            logger.info("Subproceso CAVA iniciado correctamente en modo binario de cero latencia.")
             
         except FileNotFoundError:
-            logger.error("Ejecutable 'cava' no encontrado en Linux. Se retornarán datos vacíos.")
+            logger.error(f"Ejecutable '{cava_exe}' no encontrado. Se retornarán datos vacíos.")
         except Exception as e:
             logger.error(f"Error crítico al iniciar CAVA: {e}")
 
