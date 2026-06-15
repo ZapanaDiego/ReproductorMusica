@@ -43,6 +43,46 @@ El flujo de datos debe ser estrictamente unidireccional:
 
 ---
 
+## Arbol de directorios
+```bash
+core/
+├── __init__.py
+├── bridge.py                  ← Fachada Python (Mantiene la API pública intacta)
+├── backend.py                 ← Backend Python legado (Simulación/Mock)
+├── backend_native.py          ← Adaptador Python que carga el binario .so/.dll usando ctypes
+└── engine/
+    ├── include/               ← Archivos de Cabecera (.hpp)
+    │   ├── Track.hpp          ← Definición de la entidad canción y mapeos de structs C
+    │   ├── DoublyLinkedList.hpp ← Estructura de Datos PURA (Memoria dinámica, nodos, punteros)
+    │   ├── QueueManager.hpp   ← Lógica de la Cola (Random Ponderado por Estrellas)
+    │   ├── LibraryManager.hpp ← Gestión de Biblioteca (Tabla Hash std::unordered_map e inyección JSON)
+    │   ├── AudioPlayer.hpp    ← Reproducción nativa por hardware (Abstracción de miniaudio.h)
+    │   ├── SpectrumAnalyzer.hpp ← Procesamiento espectral de buffers PCM (Frecuencias para el visualizador)
+    │   ├── PlaybackState.hpp  ← Estado atómico síncrono compartido entre hilos
+    │   ├── Engine.hpp         ← Fachada Central de C++ (Orquestador de todos los managers)
+    │   └── CApi.hpp           ← Declaraciones extern "C" planas para interoperabilidad
+    ├── src/                   ← Implementaciones de Código (.cpp)
+    │   ├── Track.cpp
+    │   ├── DoublyLinkedList.cpp
+    │   ├── QueueManager.cpp
+    │   ├── LibraryManager.cpp
+    │   ├── AudioPlayer.cpp
+    │   ├── SpectrumAnalyzer.cpp
+    │   ├── PlaybackState.cpp
+    │   ├── Engine.cpp
+    │   ├── CApi.cpp           ← Exportación de funciones para Ctypes
+    │   └── PybindBindings.cpp ← Alternativa de exportación directa para Pybind11
+    ├── third_party/           ← Librerías de terceros (Cabecera Única / Header-only)
+    │   ├── miniaudio.h        ← Decodificación y captura de dispositivos de audio
+    │   └── nlohmann/
+    │       └── json.hpp       ← Parseo ultrarrápido de library.json en C++
+    ├── CMakeLists.txt         ← Script de compilación multiplataforma
+    └── README_ENGINE.md       ← Instrucciones nativas de compilación (g++, clang, cmake)
+```
+
+
+
+
 ## 1. Capa de Entidades Base
 
 ### `core/engine/include/Track.hpp`
