@@ -1,10 +1,6 @@
 # ARCHITECTURE MASTER PLAN
 ## Motor de Audio C++ para Reproductor Musical Híbrido (Python Textual + C++17/20)
 
-> **Documento versionado:** v2.0 — Junio 2026  
-> **Autor:** Arquitecto de Software de Sistemas de Bajo Nivel  
-> **Objetivo:** Reescribir y expandir `core/backend.py` (Python + Pygame) reemplazándolo por un motor compilado en C++ modular y de alta performance, manteniendo intacto el contrato en `core/bridge.py` según el nuevo árbol de directorios optimizado.
-
 ---
 
 ## REGLA ARQUITECTÓNICA INMUTABLE
