@@ -9,15 +9,133 @@ El diseño actual busca dos objetivos principales:
 
 La interfaz gráfica corre en Python, pero la lógica real de estado, cola, reproducción, saltos, progreso, calificación y análisis espectral debe permanecer centralizada detrás del bridge. Esto permite que, en una fase posterior, `backend.py` sea reemplazado por un módulo nativo compilado sin reescribir la UI.
 
-### Ejecuciòn del programa
-Primero tienes que asegurate que tienes descargado python la verciòn màs reciente y ejecutar en la terminal esto:
+# Ejecuciòn del programa
+
+# 🐧 Para Linux (Arch Linux / Ubuntu / Debian)
+
+
+### Paso 1: Instalación de Python y CAVA (Dependencias del Sistema)
+
+Abre tu terminal y ejecuta los comandos correspondientes según tu distribución para instalar el intérprete de Python, el gestor de paquetes `pip` y el motor de audio de CAVA:
+
+#### En Arch Linux (Recomendado):
 
 ```bash
-chmod +x main.py                                          
-./main.py
+sudo pacman -Syu python python-pip cava
+
 ```
 
-### Ciclo de vida de ejecución
+#### En Ubuntu / Debian / Pop!_OS:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-venv cava
+
+```
+
+> 💡 **Nota sobre CAVA:** Al instalar el paquete global del sistema (`cava`), tu archivo `core/cava.py` detectará automáticamente que estás en Linux e invocará el comando nativo directamente, enlazándose sin problemas con tus servidores de sonido (**PulseAudio, PipeWire o ALSA**).
+
+---
+
+### Paso 2: Instalación de Dependencias de Python
+
+Con el entorno del sistema listo, procedemos a inyectar las librerías especializadas en renderizado asíncrono y empaquetado de cadenas de texto a alta velocidad.
+
+Ejecuta en tu terminal:
+
+```bash
+pip install textual rich
+
+```
+
+*(Si tu distribución de Linux te da un error de "Externally Managed Environment", te recomendamos instalar las librerías usando un entorno virtual con `python3 -m venv .venv && source .venv/bin/activate` o usando el flag `--break-system-packages` si estás seguro de tu entorno local).*
+
+---
+
+### Paso 3: Ejecución del Programa
+
+En Linux, para poder lanzar un script directamente usando `./main.py`, primero debes otorgarle permisos explícitos de ejecución al archivo en el sistema de archivos (ext4/btrfs).
+
+Ubicado en la raíz de la carpeta de tu proyecto, ejecuta:
+
+```bash
+chmod +x main.py
+./main.py
+
+```
+
+**Alternativa directa:** Si no deseas cambiar los permisos del archivo, puedes invocar directamente al intérprete de Python para que abra el proyecto en cualquier momento:
+
+```bash
+python main.py
+
+```
+
+### Para Windows
+### Paso 1: Instalación de Python mediante winget
+
+winget (Windows Package Manager) se encarga de descargar e inyectar Python en las variables de entorno (PATH) del sistema de forma automática.
+
+1. Abre una terminal (PowerShell o Símbolo del sistema) en modo Administrador.
+2. Ejecuta el comando para instalar una versión de Python estable y optimizada para el motor asíncrono de Textual:
+
+```bash
+winget install Python.Python.3.11
+
+```
+
+3. **Paso Obligatorio:** Cierra esa terminal y abre una nueva. Esto obliga a Windows a recargar el `PATH` para que reconozca los comandos `python` y `pip`.
+
+
+
+### Paso 2: Instalación de Dependencias de Python
+
+Con la terminal limpia, procedemos a descargar e instalar las librerías encargadas de la interfaz táctica y el empaquetado de caracteres.
+
+Ejecuta el gestor de paquetes de Python:
+
+```bash
+pip install textual rich
+
+```
+
+#### ¿Qué aporta cada pieza al proyecto?
+
+* **Textual (`textual`):** El framework de la aplicación. Gestiona el bucle asíncrono, la captura del teclado y refresca el renderizado estructural del reproductor.
+* **Rich (`rich`):** El motor gráfico interno. Procesa el *Run-Length Batching* para agrupar cadenas de texto del mismo color y estilo, aliviando el uso de CPU a 60 FPS.
+
+### Paso 3: Descarga de CAVA (El Binario de Datos)
+
+Dado que CAVA nativo está diseñado para subsistemas de sonido de Linux (ALSA/PulseAudio), en Windows necesitamos el **port ejecutable oficial para Windows** que captura el audio del sistema mediante **WASAPI**.
+
+1. Descarga el ejecutable desde el repositorio oficial del port para Windows:
+* **Enlace de descarga directa (GitHub Releases):** Descarga el instalador: Haz clic en tu navegador sobre el archivo **cava_win_x64_install.msi** de la página de GitHub para descargarlo.[CAVA Windows Port](https://github.com/karlstav/cava/releases).
+
+
+2. Instálalo en el sistema: Haz doble clic sobre el archivo .msi descargado. Sigue el asistente de instalación rápida (dale a "Siguiente" e "Instalar"). Esto copiará el programa de forma oficial en tus archivos de programa de Windows.
+
+
+En Windows no necesitas asignarle permisos de ejecución al archivo. Abre **PowerShell** o el **Símbolo del Sistema (CMD)** en la carpeta de tu proyecto y ejecuta cualquiera de las siguientes alternativas:
+
+### Opción 1: Usando el comando estándar de Python (Recomendado)
+
+```bash
+python main.py
+
+```
+
+### Opción 2: Usando el lanzador universal de Windows
+
+Si tienes múltiples versiones de Python instaladas, Windows incluye el comando abreviado `py` que selecciona automáticamente la versión más reciente:
+
+```bash
+py main.py
+
+```
+
+
+
+# Ciclo de vida de ejecución
 
 El ciclo completo empieza cuando se ejecuta:
 
