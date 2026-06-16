@@ -71,7 +71,7 @@ python main.py
 
 ```
 
-## Para Windows
+# Para Windows
 ### Paso 1: Instalación de Python mediante winget
 
 winget (Windows Package Manager) se encarga de descargar e inyectar Python en las variables de entorno (PATH) del sistema de forma automática.
