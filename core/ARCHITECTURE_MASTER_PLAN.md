@@ -1,1098 +1,1057 @@
-# ARCHITECTURE MASTER PLAN
-## Motor de Audio C++ para Reproductor Musical Híbrido (Python Textual + C++17/20)
-
-
-## Arbol de directorios
-```bash
-core/
-├── __init__.py
-├── bridge.py                  ← Fachada Python (Mantiene la API pública intacta)
-├── backend.py                 ← Backend Python legado (Simulación/Mock)
-├── backend_native.py          ← Adaptador Python que carga el binario .so/.dll usando ctypes
-└── engine/
-    ├── include/               ← Archivos de Cabecera (.hpp)
-    │   ├── Track.hpp          ← Definición de la entidad canción y mapeos de structs C
-    │   ├── DoublyLinkedList.hpp ← Estructura de Datos PURA (Memoria dinámica, nodos, punteros)
-    │   ├── QueueManager.hpp   ← Lógica de la Cola (Random Ponderado por Estrellas)
-    │   ├── LibraryManager.hpp ← Gestión de Biblioteca (Tabla Hash std::unordered_map e inyección JSON)
-    │   ├── AudioPlayer.hpp    ← Reproducción nativa por hardware (Abstracción de miniaudio.h)
-    │   ├── SpectrumAnalyzer.hpp ← Procesamiento espectral de buffers PCM (Frecuencias para el visualizador)
-    │   ├── PlaybackState.hpp  ← Estado atómico síncrono compartido entre hilos
-    │   ├── Engine.hpp         ← Fachada Central de C++ (Orquestador de todos los managers)
-    │   └── CApi.hpp           ← Declaraciones extern "C" planas para interoperabilidad
-    ├── src/                   ← Implementaciones de Código (.cpp)
-    │   ├── Track.cpp
-    │   ├── DoublyLinkedList.cpp
-    │   ├── QueueManager.cpp
-    │   ├── LibraryManager.cpp
-    │   ├── AudioPlayer.cpp
-    │   ├── SpectrumAnalyzer.cpp
-    │   ├── PlaybackState.cpp
-    │   ├── Engine.cpp
-    │   ├── CApi.cpp           ← Exportación de funciones para Ctypes
-    │   └── PybindBindings.cpp ← Alternativa de exportación directa para Pybind11
-    ├── third_party/           ← Librerías de terceros (Cabecera Única / Header-only)
-    │   ├── miniaudio.h        ← Decodificación y captura de dispositivos de audio
-    │   └── nlohmann/
-    │       └── json.hpp       ← Parseo ultrarrápido de library.json en C++
-    ├── CMakeLists.txt         ← Script de compilación multiplataforma
-    └── README_ENGINE.md       ← Instrucciones nativas de compilación (g++, clang, cmake)
-```
-
-## 🌐 SECCIÓN MAESTRA: MAPA DE CONECTIVIDAD Y PIPELINE TRANSFRONTERIZO
-
-El diseño del sistema exige una frontera dura entre el entorno gestionado de Python (donde ocurre el pintado de la UI de Textual y el bucle de eventos) y el entorno nativo de alto rendimiento en C++ (donde ocurre el procesamiento numérico y el control de hardware).
-
-### Diagrama de las 5 Capas de Ejecución
-
-```text
-[1. CAPA DE INTERFAZ - Python]     (ui/player.py, main.py)
-         │  - Detecta eventos de teclado/mouse (ej. presionar botón de pausa).
-         │  - Llama a los métodos de alto nivel de la fachada.
-         ▼
-[2. CAPA DE FACHADA - Python]      (core/bridge.py)
-         │  - Actúa como Firewall estructural.
-         │  - API pública inalterable: `def toggle_play(self): self.backend.toggle_play()`
-         ▼
-[3. CAPA DE ADAPTACIÓN - Python]   (core/backend_native.py)
-         │  - Carga `libmusic_engine.so` usando `ctypes.CDLL`.
-         │  - Empaqueta/desempaqueta tipos: `ctypes.c_int32`, `POINTER(TrackC)`.
-         ▼
-[4. CAPA DE COMPUERTA - C/C++]     (core/engine/src/CApi.cpp)
-         │  - Funciones `extern "C"` que anulan el Name Mangling de C++.
-         │  - Localiza la instancia estática del motor: `g_engine->toggle_play()`.
-         ▼
-[5. CAPA DE CONTROL CENTRAL - C++] (core/engine/src/Engine.cpp)
-            - Orquesta las Estructuras de Datos Avanzadas.
-            - Envía los comandos al `AudioPlayer.cpp` (hardware miniaudio).
-```
-
-### A) FLUJO DESCENDENTE: Traza de Ejecución (Acción Play/Pause)
-
-Cuando un usuario presiona la barra espaciadora en la interfaz, el evento atraviesa las 5 capas sin interrupciones. Aquí la traza exacta de código:
-
-#### 1. Capa de Interfaz (`main.py` / `ui/player.py`)
-El controlador de input detecta la pulsación y delega a la fachada (Bridge):
-```python
-# En InputController (core/input.py) o main.py
-if event.key == "space":
-    self.bridge.toggle_play()
-```
-
-#### 2. Capa de Fachada (`core/bridge.py`)
-La fachada no procesa nada. Protege a la UI de conocer si el backend es Mock o C++.
-```python
-class MusicBridge:
-    def __init__(self):
-        # Inyección de dependencia transparente
-        from core.backend_native import NativeBackend
-        self.backend = NativeBackend()
-
-    def toggle_play(self):
-        self.backend.toggle_play()
-```
-
-#### 3. Capa de Adaptación (`core/backend_native.py`)
-`ctypes` ejecuta el salto al binario de C. La configuración de `argtypes` garantiza la seguridad de memoria.
-```python
-class NativeBackend:
-    def __init__(self):
-        # Carga dinámica del archivo .so compilado
-        self._lib = ctypes.CDLL("./core/engine/build/libmusic_engine.so")
-        self._lib.engine_toggle_play.argtypes = []
-        self._lib.engine_toggle_play.restype = None
-
-    def toggle_play(self):
-        self._lib.engine_toggle_play()  # ← SALTO AL BINARIO C++
-```
-
-#### 4. Capa de Compuerta Nativa (`core/engine/src/CApi.cpp`)
-El hilo de ejecución abandona el Intérprete de Python (GIL) y entra en espacio nativo de ejecución. El bloque `extern "C"` captura la llamada sin mangling.
-```cpp
-#include "Engine.hpp"
-#include <mutex>
-#include <memory>
-
-static std::unique_ptr<Engine> g_engine = nullptr;
-static std::mutex g_api_mutex;
-
-extern "C" {
-    // La ABI plana de C asegura compatibilidad binaria perfecta
-    void engine_toggle_play() {
-        // Bloqueo mínimo para garantizar thread-safety en invocaciones C-API
-        std::lock_guard<std::mutex> lock(g_api_mutex);
-        if (g_engine) {
-            g_engine->toggle_play();
-        }
-    }
-}
-```
-
-#### 5. Capa de Control Central (`core/engine/src/Engine.cpp` -> `AudioPlayer.cpp`)
-`Engine` transmite la petición al reproductor, el cual invierte atómicamente el estado compartido (`PlaybackState`), lo que afectará inmediatamente al `data_callback` de la tarjeta de sonido.
-```cpp
-// En Engine.cpp
-void Engine::toggle_play() {
-    audio_player->toggle_pause();
-}
-
-// En AudioPlayer.cpp
-void AudioPlayer::toggle_pause() {
-    // memory_order_acquire: asegura leer la versión más reciente en memoria caché
-    bool current_state = shared_state->is_playing.load(std::memory_order_acquire);
-    
-    // memory_order_release: publica el cambio inmediatamente al hilo de audio (callback)
-    shared_state->is_playing.store(!current_state, std::memory_order_release);
-}
-```
+# ARCHITECTURE MASTER PLAN v2.0
+## Motor de Audio C++ para Reproductor Musical Híbrido (Python Textual + C++17)
+**Última revisión:** Sprint 3.5 completado — Fase Python 100% funcional  
+**Próxima fase:** Migración del `MockBackend` al motor nativo en C++
 
 ---
 
-### B) FLUJO ASCENDENTE: Traza de Telemetría (Progreso y Espectro visual)
-
-El bucle UI principal consulta el backend 60 veces por segundo para pintar barras y el tiempo.
-**Regla crítica:** La recolección de telemetría debe ser "Wait-Free" (O(1) estricto). No pueden haber semáforos (`std::mutex`) compitiendo con el bucle de audio, o la música se entrecortará (glitches) y la UI tendrá latencia.
-
-#### 1. Producción de Datos (El Hilo de Hardware en C++)
-El Driver del Sistema Operativo invoca cíclicamente la función en `AudioPlayer.cpp`.
-```cpp
-// Este callback ocurre ~100 veces por segundo en un hilo del OS de muy alta prioridad
-void AudioPlayer::data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    auto* player = static_cast<AudioPlayer*>(pDevice->pUserData);
-    
-    // 1. Decodificar audio
-    ma_decoder_read_pcm_frames(&player->decoder, pOutput, frameCount, &frames_read);
-    
-    // 2. Escribir telemetría al bus compartido de forma lock-free
-    if (frames_read > 0) {
-        // A) Actualizar ms
-        double ms_added = (frames_read / player->state->sample_rate.load()) * 1000.0;
-        double current_ms = player->state->progress_ms.load(std::memory_order_relaxed);
-        player->state->progress_ms.store(current_ms + ms_added, std::memory_order_relaxed);
-        
-        // B) Alimentar el Spectrum Analyzer con las muestras de PCM crudo
-        if (player->spectrum_analyzer) {
-            player->spectrum_analyzer->push_samples(static_cast<float*>(pOutput), frames_read * 2);
-        }
-    }
-}
-```
-
-#### 2. Extracción Plana (C-API -> ctypes)
-El hilo principal de Python hace la petición de la telemetría a través del proxy.
-```cpp
-// En CApi.cpp
-extern "C" {
-    double engine_get_progress() {
-        // Lectura directa atómica (sin locks) O(1)
-        return g_engine ? g_engine->get_progress_ms() : 0.0;
-    }
-
-    // El buffer pre-alojado se rellena copiando la memoria directamente
-    void engine_get_spectrum_bars(float* out_bars, int num_bars) {
-        if (g_engine) {
-            g_engine->fill_spectrum(out_bars, num_bars);
-        }
-    }
-}
-```
-
-```python
-# En backend_native.py
-def get_progress(self) -> float:
-    return self._lib.engine_get_progress()
-
-def get_audio_bars(self, num_bars: int) -> list[float]:
-    # Creamos un array continuo en memoria que C pueda escribir
-    ArrayType = ctypes.c_float * num_bars
-    bars_array = ArrayType()
-    
-    # Pasamos el puntero (byref). C escribirá encima O(1) memcopy
-    self._lib.engine_get_spectrum_bars(ctypes.byref(bars_array), num_bars)
-    
-    # Casteamos la memoria C-like a lista de Python
-    return list(bars_array)
-```
-
-#### 3. Renderizado Visual (UI de Textual)
-`bridge.py` le entrega los flotantes crudos (`0.0` a `1.0`) a `ui/visualizer.py` donde los transforma en barras ASCII y repinta el Widget al instante.
+## ÍNDICE
+1. [Diagnóstico de la Arquitectura Actual (Hybrid-Ready)](#1-diagnóstico-de-la-arquitectura-actual)
+2. [Árbol de Directorios Futuro](#2-árbol-de-directorios-futuro)
+3. [Mapeo de Estructuras de Datos Académicas](#3-mapeo-de-estructuras-de-datos-académicas)
+4. [Especificación de Clases y Métodos en C++](#4-especificación-de-clases-y-métodos-en-c)
+5. [Plan de Implementación Paso a Paso](#5-plan-de-implementación-paso-a-paso)
+6. [Contrato de la C-API (Tabla de Funciones Exportadas)](#6-contrato-de-la-c-api)
 
 ---
 
-## 1. Capa de Entidades Base
+## 1. Diagnóstico de la Arquitectura Actual
 
-### `core/engine/include/Track.hpp`
-Define la estructura básica de una pista de audio y la versión POD (Plain Old Data) para cruzar la frontera C/Python sin sobrecarga de serialización.
+### 1.1 Estado Real del Prototipo Python
 
+El sistema Python está completamente operativo y desacoplado en tres capas claramente separadas. El flujo de datos tiene **una sola dirección descendente** para comandos y **una sola dirección ascendente** para estado:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  CAPA 1: UI ASÍNCRONA (Textual Event Loop — Hilo Principal)     │
+│                                                                 │
+│  main.py ──► MusicPlayerApp                                     │
+│    • on_key()  →  input.py (InputController)                    │
+│    • update_ui() cada 0.1s  →  lee estado del bridge            │
+│    • push_screen(AlbumInputModal) para diálogos                 │
+│                                                                 │
+│  ui/views.py     → DataTable (Library, Queue, Albums)           │
+│  ui/player.py    → PlayerBottomBar (ProgressBar + tiempo)       │
+│  ui/info_panel.py→ 4 zonas: Header/Meta/Playback/Shortcuts      │
+│  ui/visualizer.py→ CavaVisualizer (barras espectrales)          │
+│  ui/modals.py    → AlbumInputModal (ModalScreen[str])           │
+└────────────────────────┬────────────────────────────────────────┘
+                         │  Llamadas de método directas (sin bus)
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  CAPA 2: FACHADA (Facade Pattern — core/bridge.py)             │
+│                                                                 │
+│  MusicBridge  ←── ÚNICA interfaz que la UI conoce              │
+│  • __init__(current_user) → inyecta usuario en MockBackend      │
+│  • play() / pause() / toggle_play() / next() / prev()           │
+│  • get_current_track() / get_progress() / is_playing()          │
+│  • get_library() / get_queue() / get_queue_version()            │
+│  • toggle_random() / set_rating() / play_selection()            │
+│  • create_album() / add_track_to_album() / remove_album()       │
+│  • get_audio_bars(num_bars) / get_acoustic_dna()                │
+│                                                                 │
+│  CONTRATO INMUTABLE: La UI nunca importa MockBackend.           │
+│  Cuando se cambie backend.py por C++, CERO cambios en la UI.   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │  self.backend.method()
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  CAPA 3: NÚCLEO DE NEGOCIO (core/backend.py — Hilo de Audio)   │
+│                                                                 │
+│  MockBackend                                                    │
+│  Estado:                                                        │
+│    • library: list[Track]          → std::vector futuro         │
+│    • queue: list[Track]            → DoublyLinkedList futuro    │
+│    • current_index: int            → puntero al nodo actual     │
+│    • is_playing: bool              → std::atomic<bool> futuro   │
+│    • is_paused: bool               → flag de reanudación        │
+│    • progress: float               → segundos transcurridos     │
+│    • current_user: dict            → struct User futuro         │
+│                                                                 │
+│  Hilos:                                                         │
+│    • _playback_loop (daemon)       → bucle cada 50ms            │
+│      - acumula dt con time.time()                               │
+│      - detecta fin con pygame.mixer.music.get_busy()            │
+│      - llama _next_track_locked() bajo threading.Lock           │
+│    • CavaSubprocess (daemon)       → lee barras espectrales      │
+│                                                                 │
+│  Audio:                                                         │
+│    • Pygame (SDL_VIDEODRIVER=dummy para terminal)               │
+│    • Mutagen: lee duración exacta de VBR MP3 en scan            │
+│                                                                 │
+│  Persistencia:                                                  │
+│    • library.json: lista de pistas con metadatos                │
+│    • users_db.json: usuarios + liked_tracks + liked_albums      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 Por qué el Facade Pattern hace la migración segura
+
+El `MusicBridge` actúa como **firewall contractual**. En este momento su `__init__` contiene:
+
+```python
+# core/bridge.py — línea 25 (actual)
+self.backend = MockBackend(current_user)
+```
+
+Para migrar al motor C++, esa línea se convierte en:
+
+```python
+# core/bridge.py — línea 25 (post-migración)
+from core.backend_native import NativeBackend
+self.backend = NativeBackend(current_user)
+```
+
+**Eso es todo el cambio en Python.** La UI nunca sabrá que el backend cambió porque el `MusicBridge` garantiza que `NativeBackend` exponga exactamente los mismos atributos y métodos que `MockBackend`.
+
+### 1.3 Contratos actuales del MockBackend que NativeBackend debe respetar
+
+| Atributo/Método Python | Tipo | Notas para C++ |
+|---|---|---|
+| `backend.library` | `list[Track]` | Vector de structs exportado vía snapshot |
+| `backend.queue` | `list[Track]` | Snapshot de la DLL exportado en cada tick |
+| `backend.current_index` | `int` | Índice del nodo actual en la DLL |
+| `backend.is_playing` | `bool` | `std::atomic<bool>` en el estado compartido |
+| `backend.is_paused` | `bool` | Flag de pausa separado para no confundir con stop |
+| `backend.progress` | `float` | Segundos acumulados, consultado en cada tick |
+| `backend.queue_version` | `int` | Contador atómico incrementado al regenerar la cola |
+| `backend.library_version` | `int` | Contador atómico incrementado al actualizar ratings |
+| `backend.is_random_mode` | `bool` | Estado de modo aleatorio ponderado |
+| `backend.current_user` | `dict` | Datos del usuario activo (id, name, liked_albums) |
+| `backend.toggle_play()` | `None` | Alterna entre play y pause |
+| `backend.next_track()` | `None` | Siguiente en la DLL |
+| `backend.prev_track()` | `None` | Anterior en la DLL (si progress > 3s, reinicia) |
+| `backend.jump_to_queue_index(i)` | `None` | Salta al nodo i de la DLL |
+| `backend.generate_queue()` | `None` | Reconstruye la cola (random ponderado o secuencial) |
+| `backend.toggle_random()` | `bool` | Alterna modo, regenera cola, retorna estado |
+| `backend.set_rating(id, stars)` | `None` | Actualiza rating en library + queue + JSON |
+| `backend.play_selection(tab, row)` | `None` | Reproduce por fila de tabla |
+| `backend.rate_selection(tab, row, stars)` | `None` | Califica por fila de tabla |
+| `backend.get_current_track()` | `Track\|None` | Nodo actual de la DLL como objeto Python |
+| `backend.get_audio_bars(n)` | `list[float]` | n barras espectrales [0.0, 1.0] |
+| `backend.get_acoustic_dna()` | `dict` | Semilla, perfil, color ambiental de la pista |
+| `backend.get_directories()` | `list[dict]` | Directorios escaneados y si existen |
+| `backend.create_album(name)` | `bool` | Crea álbum vacío en JSON del usuario |
+| `backend.add_track_to_album(name, id)` | `bool` | Añade id a la lista del álbum |
+| `backend.get_albums_summary()` | `list[dict]` | `[{name, count}]` de todos los álbumes |
+| `backend.get_album_tracks(name)` | `list[Track]` | Objetos Track reales del álbum |
+| `backend.remove_album(name)` | `bool` | Elimina álbum del JSON |
+| `backend.remove_track_from_album(name, id)` | `bool` | Elimina id del álbum en JSON |
+| `backend.like_track(id)` | `bool` | Añade/quita de liked_tracks |
+| `backend.get_active_user_name()` | `str` | Nombre del usuario activo |
+
+---
+
+## 2. Árbol de Directorios Futuro
+
+```
+vercion02/
+├── main.py                          ← SIN CAMBIOS (Textual App)
+├── styles.tcss                      ← SIN CAMBIOS
+├── library.json                     ← Generado por LibraryManager C++
+├── app.log                          ← SIN CAMBIOS
+│
+├── ui/                              ← SIN CAMBIOS (bloque sellado)
+│   ├── __init__.py
+│   ├── views.py
+│   ├── player.py
+│   ├── visualizer.py
+│   ├── info_panel.py
+│   └── modals.py
+│
+└── core/
+    ├── __init__.py
+    ├── input.py                     ← SIN CAMBIOS
+    ├── logger.py                    ← SIN CAMBIOS
+    ├── cava.py                      ← SIN CAMBIOS (subproceso CAVA)
+    ├── user_manager.py              ← SIN CAMBIOS (CLI pre-Textual)
+    │
+    ├── bridge.py                    ← [MODIFICAR] 1 línea: self.backend = NativeBackend()
+    │
+    ├── backend.py                   ← [DEPRECAR] Mantener como fallback en desarrollo
+    │
+    ├── backend_native.py            ← [NUEVO] Adaptador Python → C++
+    │   # Usa ctypes para cargar libmusic_engine.so
+    │   # Expone los mismos atributos que MockBackend
+    │   # Convierte structs C a objetos Track Python
+    │
+    ├── database/
+    │   └── users_db.json            ← Gestionado por UserManager C++
+    │
+    └── engine/                      ← Motor C++ (compilado a .so)
+        ├── CMakeLists.txt           ← [IMPLEMENTAR] Script de build
+        ├── README_ENGINE.md
+        │
+        ├── third_party/
+        │   ├── miniaudio.h          ← YA PRESENTE. Audio sin dependencias.
+        │   └── nlohmann/
+        │       └── json.hpp         ← YA PRESENTE. Parser JSON header-only.
+        │
+        ├── include/                 ← Cabeceras (esqueletos YA creados)
+        │   ├── Track.hpp            ← [COMPLETAR] struct TrackC + class Track
+        │   ├── DoublyLinkedList.hpp ← [IMPLEMENTAR] template DLL
+        │   ├── QueueManager.hpp     ← [IMPLEMENTAR] cola ponderada
+        │   ├── LibraryManager.hpp   ← [IMPLEMENTAR] hash map + scan
+        │   ├── AudioPlayer.hpp      ← [IMPLEMENTAR] abstracción miniaudio
+        │   ├── SpectrumAnalyzer.hpp ← [IMPLEMENTAR] FFT simple
+        │   ├── PlaybackState.hpp    ← [IMPLEMENTAR] atomics compartidos
+        │   ├── Engine.hpp           ← [IMPLEMENTAR] fachada C++
+        │   └── CApi.hpp             ← [IMPLEMENTAR] extern "C" declaraciones
+        │
+        ├── src/                     ← Implementaciones (todos vacíos, pendientes)
+        │   ├── Track.cpp
+        │   ├── DoublyLinkedList.cpp
+        │   ├── QueueManager.cpp
+        │   ├── LibraryManager.cpp
+        │   ├── AudioPlayer.cpp
+        │   ├── SpectrumAnalyzer.cpp
+        │   ├── PlaybackState.cpp
+        │   ├── Engine.cpp
+        │   ├── CApi.cpp
+        │   └── PybindBindings.cpp  ← Alternativa a ctypes (opcional)
+        │
+        └── build/                  ← [GENERADO por CMake, en .gitignore]
+            └── libmusic_engine.so  ← Binario final que carga backend_native.py
+```
+
+### Archivos que desaparecen en Fase Final
+
+| Archivo | Destino |
+|---|---|
+| `core/backend.py` (MockBackend) | Reemplazado por `core/backend_native.py` + `libmusic_engine.so` |
+| `pygame` (dependencia) | Reemplazado por `miniaudio.h` en C++ |
+| `mutagen` (dependencia) | Reemplazado por parsing de metadatos ID3 en C++ con `miniaudio` |
+| `CavaSubprocess` | Reemplazado por `SpectrumAnalyzer` con FFT sobre buffer PCM real |
+
+---
+
+## 3. Mapeo de Estructuras de Datos Académicas
+
+### 3.1 Entidad: Track
+
+**Python actual:**
+```python
+class Track:
+    id: int; title: str; artist: str; album: str
+    duration: float; path: str; stars: int
+```
+
+**C++ futuro:**
 ```cpp
-#pragma once
-
-#include <string>
-#include <cstdint>
-
-constexpr size_t MAX_STR_LEN = 512;
-
-extern "C" {
-    struct TrackC {
-        int32_t id;
-        char title[MAX_STR_LEN];
-        char artist[MAX_STR_LEN];
-        char album[MAX_STR_LEN];
-        double duration;
-        char path[MAX_STR_LEN];
-        int32_t stars;
-    };
-}
-
-class Track {
-public:
-    int32_t id;
+// include/Track.hpp
+struct Track {
+    int32_t     id;
     std::string title;
     std::string artist;
     std::string album;
-    double duration;
+    double      duration;    // segundos exactos de Mutagen/miniaudio
     std::string path;
+    int32_t     stars;       // 1, 2, 3
+};
+
+// Para el cruce de frontera ctypes (ABI plana, sin vtable):
+struct TrackC {
+    int32_t id;
+    char    title[256];
+    char    artist[256];
+    char    album[128];
+    double  duration;
+    char    path[512];
     int32_t stars;
-
-    Track() : id(-1), duration(0.0), stars(1) {}
-
-    Track(int32_t _id, std::string _title, std::string _artist, 
-          std::string _album, double _duration, std::string _path, int32_t _stars)
-        : id(_id), title(std::move(_title)), artist(std::move(_artist)),
-          album(std::move(_album)), duration(_duration), path(std::move(_path)), stars(_stars) {}
-
-    TrackC to_c_struct() const;
-    int64_t get_acoustic_seed() const;
 };
 ```
 
-### `core/engine/src/Track.cpp`
+**Razón de la doble representación:** `Track` (con `std::string`) es la estructura interna de C++ con todas las comodidades del lenguaje. `TrackC` es la estructura "aplanada" (POD — Plain Old Data) que ctypes puede leer directamente desde Python sin conversión. La C-API serializa `Track` → `TrackC` antes de enviarlo a Python.
+
+---
+
+### 3.2 Gestión de Biblioteca: `LibraryManager`
+
+**Python actual:** `self.library = []` (lista Python simple, acceso O(n))
+
+**C++ diseño:**
+
+```
+ESTRUCTURA PRINCIPAL:  std::vector<Track>  (índice posicional para la UI)
+ÍNDICE POR ID:         std::unordered_map<int32_t, size_t>  → O(1) búsqueda por ID
+ÍNDICE POR TÍTULO:     std::multimap<std::string, size_t>   → O(log n) ordenación
+```
+
+**¿Por qué vector + índice en lugar de árbol puro?**
+
+La UI necesita acceso posicional `library[row]` para mapear filas de la `DataTable` a tracks. Un árbol AVL puro no tiene índice posicional sin recorrido in-order O(n). La solución híbrida mantiene el vector como almacén principal y el `unordered_map` como índice de búsqueda rápida:
+
 ```cpp
-#include "Track.hpp"
-#include <cstring>
-#include <numeric>
+class LibraryManager {
+    std::vector<Track>                       library;      // O(1) acceso por posición
+    std::unordered_map<int32_t, size_t>      id_index;     // O(1) búsqueda por ID
+    std::multimap<std::string, size_t>       title_index;  // O(log n) ordenación
 
-TrackC Track::to_c_struct() const {
-    TrackC c_track;
-    c_track.id = this->id;
-    c_track.duration = this->duration;
-    c_track.stars = this->stars;
-
-    std::strncpy(c_track.title, this->title.c_str(), MAX_STR_LEN - 1);
-    c_track.title[MAX_STR_LEN - 1] = '\0';
-    std::strncpy(c_track.artist, this->artist.c_str(), MAX_STR_LEN - 1);
-    c_track.artist[MAX_STR_LEN - 1] = '\0';
-    std::strncpy(c_track.album, this->album.c_str(), MAX_STR_LEN - 1);
-    c_track.album[MAX_STR_LEN - 1] = '\0';
-    std::strncpy(c_track.path, this->path.c_str(), MAX_STR_LEN - 1);
-    c_track.path[MAX_STR_LEN - 1] = '\0';
-
-    return c_track;
-}
-
-int64_t Track::get_acoustic_seed() const {
-    std::string seed_str = title + "-" + artist + "-" + std::to_string(id);
-    int64_t seed = 0;
-    for (size_t i = 0; i < seed_str.length(); ++i) {
-        seed += static_cast<int64_t>(seed_str[i]) * static_cast<int64_t>(i + 1);
-    }
-    return seed;
-}
+public:
+    // Carga desde library.json usando nlohmann::json
+    bool load_from_json(const std::string& path);
+    
+    // Escanea ~/Música o ~/Music y llena la biblioteca
+    void scan_directories(const std::vector<std::string>& paths);
+    
+    // O(1) por ID gracias al índice hash
+    Track* find_by_id(int32_t id);
+    
+    // Acceso posicional para la UI (row → track)
+    Track* at(size_t index);
+    size_t size() const;
+    
+    // Actualiza rating en memoria Y persiste en library.json
+    bool set_rating(int32_t track_id, int32_t stars);
+    
+    void save_to_json(const std::string& path);
+    
+    // Snapshot para enviar a Python: serializa a vector<TrackC>
+    std::vector<TrackC> get_snapshot() const;
+};
 ```
 
 ---
 
-## 2. Estructuras de Datos Avanzadas
+### 3.3 Cola de Reproducción: `PlaybackQueue` (Lista Doblemente Enlazada)
 
-### `core/engine/include/DoublyLinkedList.hpp`
-Lista Doblemente Enlazada genérica para la Cola de Reproducción bidireccional.
+**Python actual:** `self.queue = list(self.library)` o lista barajada. Navegación O(1) en lista Python (pero no es DLL real).
+
+**C++ diseño — Lista Doblemente Enlazada Académica:**
 
 ```cpp
-#pragma once
-
-#include <cstddef>
-
+// include/DoublyLinkedList.hpp
 template <typename T>
-struct Node {
-    T data;
-    Node* prev;
-    Node* next;
-    explicit Node(const T& val) : data(val), prev(nullptr), next(nullptr) {}
+struct DLLNode {
+    T           data;
+    DLLNode<T>* prev;
+    DLLNode<T>* next;
+
+    explicit DLLNode(T val) : data(std::move(val)), prev(nullptr), next(nullptr) {}
 };
 
 template <typename T>
 class DoublyLinkedList {
-private:
-    Node<T>* head_node;
-    Node<T>* tail_node;
-    size_t list_size;
+    DLLNode<T>* head;
+    DLLNode<T>* tail;
+    DLLNode<T>* current;   // puntero al nodo en reproducción
+    size_t      _size;
 
 public:
-    DoublyLinkedList() : head_node(nullptr), tail_node(nullptr), list_size(0) {}
-    ~DoublyLinkedList() { clear(); }
+    DoublyLinkedList();
+    ~DoublyLinkedList();
+
+    void push_back(T item);       // O(1) — añadir al final
+    void clear();                 // O(n) — libera memoria
+
+    // Navegación O(1) — solo mover el puntero
+    T*   current_item();          // nodo activo
+    bool move_next();             // avanza, wraps al head si llega al tail
+    bool move_prev();             // retrocede, wraps al tail si llega al head
+    bool jump_to_index(size_t i); // O(n) — necesario para "clic en fila"
     
-    DoublyLinkedList(const DoublyLinkedList&) = delete;
-    DoublyLinkedList& operator=(const DoublyLinkedList&) = delete;
-
-    DoublyLinkedList(DoublyLinkedList&& other) noexcept 
-        : head_node(other.head_node), tail_node(other.tail_node), list_size(other.list_size) {
-        other.head_node = nullptr;
-        other.tail_node = nullptr;
-        other.list_size = 0;
-    }
-
-    void clear();
-    void append(const T& value);
-    Node<T>* get_head() const { return head_node; }
-    Node<T>* get_tail() const { return tail_node; }
-    size_t size() const { return list_size; }
-    bool is_empty() const { return list_size == 0; }
-    Node<T>* get_at_index(size_t index) const;
+    size_t current_index() const;
+    size_t size() const;
+    
+    // Snapshot para Python (no expone punteros)
+    std::vector<T> to_vector() const;
 };
 ```
 
-### `core/engine/src/DoublyLinkedList.cpp`
-```cpp
-#include "DoublyLinkedList.hpp"
-#include "Track.hpp"
-
-// Instanciación explícita para evitar linker errors en cabeceras dependientes
-template class DoublyLinkedList<Track>;
-
-template <typename T>
-void DoublyLinkedList<T>::clear() {
-    Node<T>* current = head_node;
-    while (current != nullptr) {
-        Node<T>* next_node = current->next;
-        delete current;
-        current = next_node;
-    }
-    head_node = nullptr;
-    tail_node = nullptr;
-    list_size = 0;
-}
-
-template <typename T>
-void DoublyLinkedList<T>::append(const T& value) {
-    Node<T>* new_node = new Node<T>(value);
-    if (is_empty()) {
-        head_node = new_node;
-        tail_node = new_node;
-    } else {
-        tail_node->next = new_node;
-        new_node->prev = tail_node;
-        tail_node = new_node;
-    }
-    list_size++;
-}
-
-template <typename T>
-Node<T>* DoublyLinkedList<T>::get_at_index(size_t index) const {
-    if (index >= list_size) return nullptr;
-    Node<T>* current = nullptr;
-    if (index <= list_size / 2) {
-        current = head_node;
-        for (size_t i = 0; i < index; ++i) current = current->next;
-    } else {
-        current = tail_node;
-        for (size_t i = list_size - 1; i > index; --i) current = current->prev;
-    }
-    return current;
-}
-```
-
----
-
-## 3. Gestión de Biblioteca e Indexación O(1)
-
-### `core/engine/include/LibraryManager.hpp`
-Maneja base de datos de canciones con indexación `O(1)` usando `std::unordered_map` y paralelamente `std::vector` para iteración en orden.
+**Clase de gestión de alto nivel:**
 
 ```cpp
-#pragma once
-#include "Track.hpp"
-#include <vector>
-#include <unordered_map>
-#include <string>
-#include <mutex>
-#include <atomic>
-
-class LibraryManager {
-private:
-    std::string db_path;
-    std::vector<Track> library_list;
-    std::unordered_map<int32_t, Track> library_map;
-    mutable std::mutex lib_mutex;
-    std::atomic<int32_t> version{0};
-
-public:
-    explicit LibraryManager(std::string path);
-    bool load_from_disk();
-    bool save_to_disk();
-    bool get_track_by_id(int32_t id, Track& out_track) const;
-    bool update_rating(int32_t id, int32_t new_stars);
-    std::vector<Track> get_all_tracks() const;
-    int32_t get_version() const { return version.load(std::memory_order_relaxed); }
-};
-```
-
-### `core/engine/src/LibraryManager.cpp`
-```cpp
-#include "LibraryManager.hpp"
-#include <fstream>
-#include <iostream>
-#include "nlohmann/json.hpp" 
-
-using json = nlohmann::json;
-
-LibraryManager::LibraryManager(std::string path) : db_path(std::move(path)) {}
-
-bool LibraryManager::load_from_disk() {
-    std::lock_guard<std::mutex> lock(lib_mutex);
-    std::ifstream file(db_path);
-    if (!file.is_open()) return false;
-
-    try {
-        json j;
-        file >> j;
-        library_list.clear();
-        library_map.clear();
-        library_list.reserve(j.size());
-        library_map.reserve(j.size());
-
-        for (const auto& item : j) {
-            Track t(
-                item.value("id", -1), item.value("title", "Unknown"),
-                item.value("artist", "Unknown"), item.value("album", "Unknown"),
-                item.value("duration", 0.0), item.value("path", ""), item.value("stars", 1)
-            );
-            if (t.id != -1) {
-                library_list.push_back(t);
-                library_map.emplace(t.id, t);
-            }
-        }
-        version.fetch_add(1, std::memory_order_release);
-        return true;
-    } catch (const json::exception&) {
-        return false;
-    }
-}
-
-bool LibraryManager::save_to_disk() {
-    std::lock_guard<std::mutex> lock(lib_mutex);
-    json j_array = json::array();
-    for (const auto& t : library_list) {
-        j_array.push_back({
-            {"id", t.id}, {"title", t.title}, {"artist", t.artist},
-            {"album", t.album}, {"duration", t.duration}, {"path", t.path}, {"stars", t.stars}
-        });
-    }
-    std::ofstream file(db_path, std::ios::trunc);
-    if (!file.is_open()) return false;
-    file << j_array.dump(4);
-    return true;
-}
-
-bool LibraryManager::get_track_by_id(int32_t id, Track& out_track) const {
-    std::lock_guard<std::mutex> lock(lib_mutex);
-    auto it = library_map.find(id);
-    if (it != library_map.end()) {
-        out_track = it->second;
-        return true;
-    }
-    return false;
-}
-
-bool LibraryManager::update_rating(int32_t id, int32_t new_stars) {
-    std::lock_guard<std::mutex> lock(lib_mutex);
-    auto it = library_map.find(id);
-    if (it == library_map.end()) return false;
-    it->second.stars = new_stars;
-    for (auto& t : library_list) {
-        if (t.id == id) { t.stars = new_stars; break; }
-    }
-    version.fetch_add(1, std::memory_order_release);
-    return true;
-}
-
-std::vector<Track> LibraryManager::get_all_tracks() const {
-    std::lock_guard<std::mutex> lock(lib_mutex);
-    return library_list;
-}
-```
-
----
-
-## 4. Gestión de Cola de Reproducción y Random Ponderado
-
-### `core/engine/include/QueueManager.hpp`
-Lógica de reproducción secuencial vs. aleatoria. Algoritmo `Roulette Wheel Selection` (Muestreo ponderado de Alias) mediante `std::discrete_distribution`.
-
-```cpp
-#pragma once
-#include "DoublyLinkedList.hpp"
-#include "Track.hpp"
-#include <vector>
-#include <mutex>
-#include <atomic>
-#include <random>
-
+// include/QueueManager.hpp
 class QueueManager {
-private:
-    DoublyLinkedList<Track> play_queue;
-    Node<Track>* current_node;
-    mutable std::mutex queue_mutex;
-    std::atomic<bool> random_mode{false};
-    std::atomic<int32_t> version{0};
-    std::mt19937_64 rng;
-
-    double calculate_weight(int32_t stars) const;
+    DoublyLinkedList<Track> queue;
+    bool   is_random_mode;
+    size_t queue_version;
 
 public:
-    QueueManager();
-    void generate_linear_queue(const std::vector<Track>& library);
-    void generate_weighted_random_queue(const std::vector<Track>& library);
-    void toggle_random_mode(const std::vector<Track>& library);
-    bool is_random_mode() const { return random_mode.load(std::memory_order_relaxed); }
+    // Construye la cola a partir de la biblioteca
+    // Modo secuencial: copia directa
+    // Modo random: pool ponderado por estrellas (★=1x, ★★=3x, ★★★=6x) + shuffle
+    void generate(const std::vector<Track>& library);
     
-    bool next();
-    bool previous();
-    bool jump_to_index(size_t index);
+    bool toggle_random(const std::vector<Track>& library);
+    bool get_random_mode() const;
     
-    bool get_current_track(Track& out_track) const;
-    int32_t get_current_index() const;
-    int32_t get_version() const { return version.load(std::memory_order_relaxed); }
-    void update_rating_in_queue(int32_t track_id, int32_t stars);
+    Track*  current_track();
+    bool    advance();             // siguiente → O(1)
+    bool    retreat();             // anterior → O(1)
+    bool    jump_to(size_t index); // salto directo → O(n)
+    
+    size_t  get_version() const;
+    size_t  size() const;
+    size_t  current_index() const;
+    
+    std::vector<TrackC> get_snapshot() const;
 };
 ```
 
-### `core/engine/src/QueueManager.cpp`
-```cpp
-#include "QueueManager.hpp"
-#include <chrono>
-
-QueueManager::QueueManager() : current_node(nullptr) {
-    std::random_device rd;
-    rng.seed(rd() ^ std::chrono::high_resolution_clock::now().time_since_epoch().count());
-}
-
-double QueueManager::calculate_weight(int32_t stars) const {
-    int32_t s = std::max(1, std::min(5, stars));
-    return static_cast<double>(s * (s + 1)) / 2.0;
-}
-
-void QueueManager::generate_linear_queue(const std::vector<Track>& library) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    play_queue.clear();
-    for (const auto& t : library) play_queue.append(t);
-    current_node = play_queue.get_head();
-    version.fetch_add(1, std::memory_order_release);
-}
-
-void QueueManager::generate_weighted_random_queue(const std::vector<Track>& library) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (library.empty()) return;
-    
-    std::vector<Track> pool = library;
-    std::vector<double> weights;
-    weights.reserve(pool.size());
-    for (const auto& t : pool) weights.push_back(calculate_weight(t.stars));
-    
-    play_queue.clear();
-    size_t pool_size = pool.size();
-    for (size_t i = 0; i < pool_size; ++i) {
-        std::discrete_distribution<size_t> dist(weights.begin(), weights.end());
-        size_t chosen_idx = dist(rng);
-        play_queue.append(pool[chosen_idx]);
-        pool.erase(pool.begin() + chosen_idx);
-        weights.erase(weights.begin() + chosen_idx);
-    }
-    current_node = play_queue.get_head();
-    version.fetch_add(1, std::memory_order_release);
-}
-
-void QueueManager::toggle_random_mode(const std::vector<Track>& library) {
-    bool new_mode = !random_mode.load(std::memory_order_relaxed);
-    if (new_mode) generate_weighted_random_queue(library);
-    else generate_linear_queue(library);
-    random_mode.store(new_mode, std::memory_order_release);
-}
-
-bool QueueManager::next() {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (!current_node) return false;
-    current_node = current_node->next ? current_node->next : play_queue.get_head();
-    return true;
-}
-
-bool QueueManager::previous() {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (!current_node) return false;
-    current_node = current_node->prev ? current_node->prev : play_queue.get_tail();
-    return true;
-}
-
-bool QueueManager::jump_to_index(size_t index) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    Node<Track>* target = play_queue.get_at_index(index);
-    if (target) { current_node = target; return true; }
-    return false;
-}
-
-bool QueueManager::get_current_track(Track& out_track) const {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (current_node) { out_track = current_node->data; return true; }
-    return false;
-}
-
-int32_t QueueManager::get_current_index() const {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (!current_node) return -1;
-    int32_t idx = 0;
-    Node<Track>* curr = play_queue.get_head();
-    while (curr) {
-        if (curr == current_node) return idx;
-        idx++; curr = curr->next;
-    }
-    return -1;
-}
-
-void QueueManager::update_rating_in_queue(int32_t track_id, int32_t stars) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    Node<Track>* curr = play_queue.get_head();
-    while (curr) {
-        if (curr->data.id == track_id) curr->data.stars = stars;
-        curr = curr->next;
-    }
-    version.fetch_add(1, std::memory_order_release);
-}
-```
+**Ventaja académica de la DLL:** `advance()` y `retreat()` son O(1) porque solo mueven el puntero `current`. No hay copia de datos, no hay reallocation. En Python, `list` usaba acceso por índice entero con `self.current_index`, lo cual es funcionalmente equivalente pero sin semántica de nodo.
 
 ---
 
-## 5. Subsistema de Audio y Estado Concurrente
+### 3.4 Gestión de Usuarios: `UserManager`
 
-### `core/engine/include/PlaybackState.hpp`
-Buffers de variables modificadas atómicamente para proveer lecturas sin latencia y evitar el bloqueo mutuo entre el hilo de audio nativo y el main thread de Python.
+**Python actual:** `current_user` es un `dict` Python con `liked_albums` como `dict[str, list[int]]`.
+
+**C++ diseño:**
 
 ```cpp
-#pragma once
+// Estructura base del usuario
+struct User {
+    int32_t                                              id;
+    std::string                                          name;
+    std::vector<int32_t>                                 liked_tracks;
+    std::unordered_map<std::string, std::vector<int32_t>> liked_albums;
+    // Album name → vector de track IDs
+    // unordered_map: O(1) lookup por nombre de álbum
+    // vector interno: preserva orden de inserción
+};
+
+class UserManager {
+    std::unordered_map<int32_t, User> users_table; // O(1) búsqueda por ID
+    User* active_user;
+    std::string db_path;
+
+public:
+    bool load_from_json(const std::string& path);
+    bool save_to_json();
+    
+    std::vector<std::string> get_user_names() const;
+    bool set_active_user(int32_t id);
+    
+    std::string get_active_name() const;
+    
+    // Gestión de álbumes del usuario activo
+    bool create_album(const std::string& name);
+    bool remove_album(const std::string& name);
+    bool add_track_to_album(const std::string& album, int32_t track_id);
+    bool remove_track_from_album(const std::string& album, int32_t track_id);
+    
+    // Retorna vector de {name, count} pares
+    std::vector<std::pair<std::string, size_t>> get_albums_summary() const;
+    
+    // Retorna IDs de pistas del álbum (el Engine resuelve los objetos Track)
+    std::vector<int32_t> get_album_track_ids(const std::string& album) const;
+    
+    bool like_track(int32_t track_id);
+    bool is_track_liked(int32_t track_id) const;
+};
+```
+
+**Elección de `std::unordered_map<int32_t, User>` para la tabla de usuarios:**  
+Con un máximo de 5 usuarios, el beneficio de la tabla hash es mínimo en la práctica, pero sí cumple el contrato académico de búsqueda O(1) amortizado. Si la app escala a cientos de usuarios, el comportamiento se mantiene. Un `std::map` ordenado daría O(log n) sin razón en este contexto.
+
+---
+
+### 3.5 Estado de Reproducción: `PlaybackState` (Compartido entre hilos)
+
+Este es el componente más crítico para la concurrencia. El hilo de audio de `miniaudio` (el `data_callback`) corre en contexto de alta prioridad y no puede tomar locks pesados. Toda comunicación usa **operaciones atómicas libres de bloqueo**:
+
+```cpp
+// include/PlaybackState.hpp
 #include <atomic>
+#include <cstdint>
 
 struct PlaybackState {
-    std::atomic<double> progress_ms{0.0};
-    std::atomic<bool> is_playing{false};
-    std::atomic<bool> track_ended_flag{false};
-    std::atomic<uint32_t> sample_rate{44100};
+    // Leídos/escritos por múltiples hilos — SIEMPRE atómicos
+    std::atomic<bool>     is_playing{false};
+    std::atomic<bool>     is_paused{false};
+    std::atomic<double>   progress_seconds{0.0};
+    std::atomic<int32_t>  current_track_id{-1};
+    std::atomic<int32_t>  queue_version{0};
+    std::atomic<int32_t>  library_version{0};
+    std::atomic<bool>     track_ended_flag{false}; // señal del data_callback
+    
+    // Solo el hilo de control los escribe; solo los lee el data_callback:
+    std::atomic<double>   current_duration{0.0};
 };
 ```
 
-### `core/engine/include/SpectrumAnalyzer.hpp`
-Transformación PCM a magnitudes frecuenciales.
+**Protocolo de comunicación entre hilos:**
+- El `data_callback` de miniaudio (hilo de audio) **solo lee** `is_playing` y `is_paused`.
+- El `data_callback` **solo escribe** `track_ended_flag = true` cuando su buffer de datos se vacía.
+- El hilo de control (`_playback_loop` equivalente) **lee** `track_ended_flag` cada 50ms y, si es `true`, lo resetea y llama a `QueueManager::advance()`.
+- `progress_seconds` es acumulado por el hilo de control, no por el callback.
+
+---
+
+## 4. Especificación de Clases y Métodos en C++
+
+### 4.1 `AudioPlayer` — Abstracción de miniaudio
 
 ```cpp
-#pragma once
-#include <vector>
-#include <mutex>
-
-class SpectrumAnalyzer {
-private:
-    std::vector<float> magnitudes;
-    std::mutex spec_mutex;
-public:
-    SpectrumAnalyzer() : magnitudes(128, 0.0f) {}
-    void push_samples(const float* pcm_data, size_t frame_count) {
-        // Implementación Mock rápida para el pipeline
-        std::lock_guard<std::mutex> lock(spec_mutex);
-        for(size_t i=0; i < 128; ++i) {
-            magnitudes[i] = (pcm_data && frame_count > 0) ? std::abs(pcm_data[i % frame_count]) : 0.0f;
-        }
-    }
-    void fill_bars(float* out_array, int num_bars) {
-        std::lock_guard<std::mutex> lock(spec_mutex);
-        for(int i=0; i < num_bars; ++i) out_array[i] = magnitudes[i % 128];
-    }
-};
-```
-
-### `core/engine/include/AudioPlayer.hpp`
-```cpp
+// include/AudioPlayer.hpp
 #pragma once
 #include "PlaybackState.hpp"
-#include "SpectrumAnalyzer.hpp"
+#include "Track.hpp"
+#define MINIAUDIO_IMPLEMENTATION
+#include "../third_party/miniaudio.h"
 #include <string>
-#include <memory>
-#include "miniaudio.h"
+#include <functional>
 
 class AudioPlayer {
-private:
-    ma_device device;
-    ma_decoder decoder;
-    bool is_device_init{false};
-    bool is_decoder_init{false};
+    ma_engine    engine;       // motor de audio miniaudio (maneja el hilo)
+    ma_sound     sound;        // sonido activo cargado
+    bool         sound_loaded; // flag de guard para operaciones seguras
     
+    PlaybackState* shared_state; // puntero al estado compartido (no dueño)
+
 public:
-    std::shared_ptr<PlaybackState> state;
-    std::shared_ptr<SpectrumAnalyzer> spectrum_analyzer;
-
-    static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
-
-    AudioPlayer(std::shared_ptr<PlaybackState> st, std::shared_ptr<SpectrumAnalyzer> spec);
+    explicit AudioPlayer(PlaybackState* state);
     ~AudioPlayer();
     
-    bool init();
-    bool load_and_play(const std::string& filepath);
-    void toggle_pause();
+    bool initialize();
+    void shutdown();
+    
+    // Carga y reproduce un archivo de audio (MP3, WAV, OGG, FLAC)
+    // Internamente: ma_engine_play_sound o ma_sound_init_from_file
+    bool load_and_play(const std::string& path, double duration);
+    
+    // Pausa/reanuda sin reiniciar la posición
+    void pause();
+    void resume();
     void stop();
-    void seek_to_start();
+    
+    // Consulta si el hardware aún está procesando audio
+    bool is_hardware_busy() const;
+    
+    // Posición en segundos del cursor de audio (más preciso que Pygame)
+    double get_position_seconds() const;
+    
+    // Obtiene la duración exacta del archivo (reemplaza a Mutagen)
+    static double get_file_duration(const std::string& path);
 };
 ```
 
-### `core/engine/src/AudioPlayer.cpp`
+**Nota sobre miniaudio vs Pygame:**
+- miniaudio es una librería C de cabecera única (`miniaudio.h`). Ya está en `core/engine/third_party/`.
+- `ma_sound_get_length_in_pcm_frames()` + sample rate = duración exacta en segundos, sin el bug VBR de Pygame.
+- El `data_callback` de miniaudio no es necesario implementarlo manualmente para reproducción simple: `ma_engine` lo abstrae completamente.
+
+---
+
+### 4.2 `LibraryManager` — Gestor de Biblioteca
+
+*(Ver sección 3.2 para el detalle completo de la clase)*
+
+Métodos adicionales importantes:
+
 ```cpp
-#define MINIAUDIO_IMPLEMENTATION
-#include "AudioPlayer.hpp"
-#include <iostream>
+// Lectura de metadatos sin dependencia externa
+// miniaudio puede leer ID3 tags básicos con ma_decoder
+struct TrackMetadata {
+    std::string title;
+    std::string artist;
+    std::string album;
+    double      duration;
+};
 
-void AudioPlayer::data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    auto* player = static_cast<AudioPlayer*>(pDevice->pUserData);
-    if (!player) return;
-    auto st = player->state;
-
-    if (!st->is_playing.load(std::memory_order_relaxed)) {
-        size_t bytes = frameCount * ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels);
-        std::memset(pOutput, 0, bytes);
-        return;
-    }
-
-    ma_uint64 frames_read = 0;
-    ma_decoder_read_pcm_frames(&player->decoder, pOutput, frameCount, &frames_read);
-
-    if (frames_read < frameCount) {
-        st->is_playing.store(false, std::memory_order_release);
-        st->track_ended_flag.store(true, std::memory_order_release);
-    }
-
-    uint32_t sr = st->sample_rate.load(std::memory_order_relaxed);
-    if (frames_read > 0 && sr > 0) {
-        double dt_ms = (static_cast<double>(frames_read) / sr) * 1000.0;
-        double current = st->progress_ms.load(std::memory_order_relaxed);
-        st->progress_ms.store(current + dt_ms, std::memory_order_relaxed);
-        
-        if (player->spectrum_analyzer) {
-            player->spectrum_analyzer->push_samples(static_cast<float*>(pOutput), frames_read * 2);
-        }
-    }
-}
-
-AudioPlayer::AudioPlayer(std::shared_ptr<PlaybackState> st, std::shared_ptr<SpectrumAnalyzer> spec) 
-    : state(std::move(st)), spectrum_analyzer(std::move(spec)) {}
-
-AudioPlayer::~AudioPlayer() { stop(); }
-
-bool AudioPlayer::init() {
-    ma_device_config config = ma_device_config_init(ma_device_type_playback);
-    config.playback.format = ma_format_f32;
-    config.playback.channels = 2;
-    config.sampleRate = 44100;
-    config.dataCallback = data_callback;
-    config.pUserData = this;
-    
-    if (ma_device_init(nullptr, &config, &device) != MA_SUCCESS) return false;
-    
-    state->sample_rate.store(device.sampleRate, std::memory_order_relaxed);
-    is_device_init = true;
-    ma_device_start(&device);
-    return true;
-}
-
-bool AudioPlayer::load_and_play(const std::string& filepath) {
-    if (is_decoder_init) { ma_decoder_uninit(&decoder); is_decoder_init = false; }
-    state->is_playing.store(false, std::memory_order_release);
-    state->track_ended_flag.store(false, std::memory_order_release);
-    state->progress_ms.store(0.0, std::memory_order_release);
-
-    ma_decoder_config dec_cfg = ma_decoder_config_init(ma_format_f32, device.playback.channels, device.sampleRate);
-    if (ma_decoder_init_file(filepath.c_str(), &dec_cfg, &decoder) != MA_SUCCESS) return false;
-
-    is_decoder_init = true;
-    state->is_playing.store(true, std::memory_order_release);
-    return true;
-}
-
-void AudioPlayer::toggle_pause() {
-    bool current = state->is_playing.load(std::memory_order_acquire);
-    state->is_playing.store(!current, std::memory_order_release);
-}
-
-void AudioPlayer::stop() {
-    if (is_decoder_init) ma_decoder_uninit(&decoder);
-    if (is_device_init) ma_device_uninit(&device);
-    is_decoder_init = is_device_init = false;
-}
-
-void AudioPlayer::seek_to_start() {
-    if (is_decoder_init) {
-        ma_decoder_seek_to_pcm_frame(&decoder, 0);
-        state->progress_ms.store(0.0, std::memory_order_release);
-        state->is_playing.store(true, std::memory_order_release);
-    }
-}
+static TrackMetadata read_metadata(const std::string& path);
+// Intenta: ID3v2 tags → ID3v1 tags → fallback al nombre de archivo
 ```
 
 ---
 
-## 6. Motor Central (Facade C++)
+### 4.3 `Engine` — Fachada Central C++
 
-### `core/engine/include/Engine.hpp`
+`Engine` es el `MockBackend` de C++. Orquesta todos los managers y expone una interfaz coherente para la C-API.
+
 ```cpp
+// include/Engine.hpp
 #pragma once
 #include "LibraryManager.hpp"
 #include "QueueManager.hpp"
 #include "AudioPlayer.hpp"
+#include "UserManager.hpp"
 #include "PlaybackState.hpp"
-#include "SpectrumAnalyzer.hpp"
-#include <memory>
 #include <thread>
 #include <atomic>
 
 class Engine {
-private:
-    std::unique_ptr<LibraryManager> library;
-    std::unique_ptr<QueueManager> queue;
-    std::unique_ptr<AudioPlayer> player;
+    LibraryManager  library_mgr;
+    QueueManager    queue_mgr;
+    AudioPlayer     audio_player;
+    UserManager     user_mgr;
+    PlaybackState   state;
     
-    std::shared_ptr<PlaybackState> state;
-    std::shared_ptr<SpectrumAnalyzer> spectrum;
-
-    std::atomic<bool> supervisor_running{false};
-    std::thread supervisor_thread;
-
-    void supervisor_loop();
-    void play_current();
+    // Hilo de control (equivalente a _playback_loop de Python)
+    std::thread         control_thread;
+    std::atomic<bool>   running{false};
+    
+    void _control_loop(); // corre cada 50ms; detecta fin de pista, acumula progreso
 
 public:
     Engine();
     ~Engine();
-
-    bool init(const std::string& json_db_path);
+    
+    bool initialize(const std::string& library_path,
+                    const std::string& users_db_path,
+                    int32_t            active_user_id);
     void shutdown();
-    void play_next();
-    void play_previous();
+    
+    // ── Controles de reproducción ─────────────────────────────────────
+    void play();
+    void pause();
     void toggle_play();
-    void toggle_random();
-    void jump_to_index(int32_t index);
-    void set_rating(int32_t track_id, int32_t stars);
-
-    double get_progress_ms() const;
-    bool is_playing() const;
-    bool get_current_track(Track& out) const;
-    void fill_spectrum(float* out_bars, int num_bars);
+    void next_track();
+    void prev_track();
+    void jump_to_queue_index(int32_t index);
+    
+    // ── Estado de reproducción ────────────────────────────────────────
+    const Track*   get_current_track() const;
+    double         get_progress() const;
+    bool           get_is_playing() const;
+    bool           get_is_paused() const;
+    int32_t        get_current_index() const;
+    int32_t        get_queue_version() const;
+    int32_t        get_library_version() const;
+    
+    // ── Biblioteca y cola ─────────────────────────────────────────────
+    const std::vector<Track>& get_library() const;
+    std::vector<TrackC>        get_library_snapshot() const;
+    std::vector<TrackC>        get_queue_snapshot() const;
+    bool                       toggle_random();
+    bool                       get_random_mode() const;
+    void                       set_rating(int32_t track_id, int32_t stars);
+    void                       play_selection(const std::string& tab, int32_t row);
+    
+    // ── Espectro ──────────────────────────────────────────────────────
+    // Genera barras espectrales matemáticas (mismo algoritmo que Python)
+    std::vector<float> get_audio_bars(int32_t num_bars) const;
+    
+    // ── Gestión de usuarios ───────────────────────────────────────────
+    std::string  get_active_user_name() const;
+    bool         like_track(int32_t track_id);
+    bool         create_album(const std::string& name);
+    bool         remove_album(const std::string& name);
+    bool         add_track_to_album(const std::string& album, int32_t track_id);
+    bool         remove_track_from_album(const std::string& album, int32_t track_id);
+    std::vector<std::pair<std::string,size_t>> get_albums_summary() const;
+    std::vector<TrackC> get_album_tracks(const std::string& album) const;
 };
 ```
 
-### `core/engine/src/Engine.cpp`
-```cpp
-#include "Engine.hpp"
-#include <chrono>
-
-Engine::Engine() {
-    state = std::make_shared<PlaybackState>();
-    spectrum = std::make_shared<SpectrumAnalyzer>();
-    queue = std::make_unique<QueueManager>();
-    player = std::make_unique<AudioPlayer>(state, spectrum);
-}
-
-Engine::~Engine() { shutdown(); }
-
-bool Engine::init(const std::string& json_db_path) {
-    library = std::make_unique<LibraryManager>(json_db_path);
-    if (!library->load_from_disk()) return false;
-    if (!player->init()) return false;
-
-    queue->generate_linear_queue(library->get_all_tracks());
-    
-    supervisor_running.store(true, std::memory_order_release);
-    supervisor_thread = std::thread(&Engine::supervisor_loop, this);
-    return true;
-}
-
-void Engine::shutdown() {
-    supervisor_running.store(false, std::memory_order_release);
-    if (supervisor_thread.joinable()) supervisor_thread.join();
-    player->stop();
-}
-
-void Engine::supervisor_loop() {
-    while (supervisor_running.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        if (state->track_ended_flag.exchange(false, std::memory_order_acq_rel)) {
-            play_next();
-        }
-    }
-}
-
-void Engine::play_current() {
-    Track t;
-    if (queue->get_current_track(t)) player->load_and_play(t.path);
-}
-
-void Engine::play_next() { if (queue->next()) play_current(); }
-
-void Engine::play_previous() {
-    if (get_progress_ms() > 3000.0) player->seek_to_start();
-    else if (queue->previous()) play_current();
-}
-
-void Engine::toggle_play() { player->toggle_pause(); }
-
-void Engine::toggle_random() { queue->toggle_random_mode(library->get_all_tracks()); }
-
-void Engine::jump_to_index(int32_t index) {
-    if (queue->jump_to_index(static_cast<size_t>(index))) play_current();
-}
-
-void Engine::set_rating(int32_t track_id, int32_t stars) {
-    if (library->update_rating(track_id, stars)) {
-        library->save_to_disk();
-        queue->update_rating_in_queue(track_id, stars);
-    }
-}
-
-double Engine::get_progress_ms() const { return state->progress_ms.load(std::memory_order_relaxed); }
-bool Engine::is_playing() const { return state->is_playing.load(std::memory_order_relaxed); }
-bool Engine::get_current_track(Track& out) const { return queue->get_current_track(out); }
-void Engine::fill_spectrum(float* out_bars, int num_bars) { spectrum->fill_bars(out_bars, num_bars); }
-```
-
 ---
 
-## 7. Capa de Interoperabilidad (C-API)
+### 4.4 `CApi` — Frontera Python/C++
 
-### `core/engine/src/CApi.cpp`
-Expone interfaz OPAQUE hacia Python. Elimina necesidad de compiladores de headers.
+Todas las funciones son `extern "C"` (ABI plana) para que ctypes pueda llamarlas sin descifrar el name mangling de C++. La instancia del Engine vive como singleton estático protegido por mutex.
 
 ```cpp
-#include "CApi.hpp"
-#include "Engine.hpp"
-#include "Track.hpp"
-#include <memory>
-#include <mutex>
+// include/CApi.hpp
+#pragma once
 
-static std::unique_ptr<Engine> g_engine = nullptr;
-static std::mutex g_api_mutex;
-
+#ifdef __cplusplus
 extern "C" {
+#endif
 
-int32_t engine_init(const char* db_path) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
-    if (!g_engine) g_engine = std::make_unique<Engine>();
-    return g_engine->init(std::string(db_path)) ? 0 : -1;
+// ── Ciclo de vida ─────────────────────────────────────────────────────
+void  engine_init(const char* library_path, const char* users_db_path, int active_user_id);
+void  engine_shutdown();
+
+// ── Controles ────────────────────────────────────────────────────────
+void  engine_play();
+void  engine_pause();
+void  engine_toggle_play();
+void  engine_next();
+void  engine_prev();
+void  engine_jump_to_index(int index);
+
+// ── Estado ───────────────────────────────────────────────────────────
+// Llena el struct TrackC apuntado por out_track. Retorna 0 si no hay pista.
+int   engine_get_current_track(struct TrackC* out_track);
+double engine_get_progress();
+int   engine_is_playing();
+int   engine_is_paused();
+int   engine_get_current_index();
+int   engine_get_queue_version();
+int   engine_get_library_version();
+
+// ── Biblioteca y cola ─────────────────────────────────────────────────
+// Llena out_tracks (array de TrackC de capacidad max_count). Retorna count real.
+int   engine_get_library(struct TrackC* out_tracks, int max_count);
+int   engine_get_queue(struct TrackC* out_tracks, int max_count);
+int   engine_toggle_random();
+void  engine_set_rating(int track_id, int stars);
+
+// ── Espectro ──────────────────────────────────────────────────────────
+// Llena out_bars con num_bars floats [0.0, 1.0].
+void  engine_get_audio_bars(float* out_bars, int num_bars);
+
+// ── Usuarios ──────────────────────────────────────────────────────────
+void  engine_get_active_user_name(char* out_name, int max_len);
+int   engine_like_track(int track_id);
+int   engine_create_album(const char* name);
+int   engine_remove_album(const char* name);
+int   engine_add_track_to_album(const char* album, int track_id);
+int   engine_remove_track_from_album(const char* album, int track_id);
+
+// Llena out_pairs como array alternado: [name0, name1, ...] y out_counts como [count0, count1, ...]
+int   engine_get_albums_summary(char** out_names, int* out_counts, int max_albums);
+int   engine_get_album_tracks(const char* album, struct TrackC* out_tracks, int max_count);
+
+#ifdef __cplusplus
 }
-
-void engine_toggle_play() { std::lock_guard<std::mutex> lock(g_api_mutex); if(g_engine) g_engine->toggle_play(); }
-void engine_play_next() { std::lock_guard<std::mutex> lock(g_api_mutex); if(g_engine) g_engine->play_next(); }
-void engine_play_previous() { std::lock_guard<std::mutex> lock(g_api_mutex); if(g_engine) g_engine->play_previous(); }
-
-double engine_get_progress() { return g_engine ? g_engine->get_progress_ms() / 1000.0 : 0.0; }
-int32_t engine_is_playing() { return (g_engine && g_engine->is_playing()) ? 1 : 0; }
-
-int32_t engine_get_current_track(TrackC* out) {
-    if (!g_engine || !out) return 0;
-    Track t;
-    if (g_engine->get_current_track(t)) { *out = t.to_c_struct(); return 1; }
-    return 0;
-}
-
-void engine_get_spectrum_bars(float* out_bars, int num_bars) {
-    if(g_engine && out_bars) g_engine->fill_spectrum(out_bars, num_bars);
-}
-}
+#endif
 ```
 
 ---
 
-## 8. Adaptador Python y Compilación
+### 4.5 `backend_native.py` — Adaptador Python
 
-### `core/backend_native.py`
-Enlaza el framework de UI de Python (`ui/player.py`) con el backend `CApi.cpp`. 
+Este archivo es el único intermediario entre ctypes y el `MusicBridge`. Su responsabilidad es traducir tipos C a objetos Python.
 
 ```python
+# core/backend_native.py
 import ctypes
 import os
 from pathlib import Path
 
-MAX_STR_LEN = 512
+LIB_PATH = str(Path(__file__).parent / "engine" / "build" / "libmusic_engine.so")
 
+# Struct Python espejo de TrackC en C++
 class TrackC(ctypes.Structure):
     _fields_ = [
-        ("id", ctypes.c_int32), ("title", ctypes.c_char * MAX_STR_LEN),
-        ("artist", ctypes.c_char * MAX_STR_LEN), ("album", ctypes.c_char * MAX_STR_LEN),
-        ("duration", ctypes.c_double), ("path", ctypes.c_char * MAX_STR_LEN),
-        ("stars", ctypes.c_int32)
+        ("id",       ctypes.c_int32),
+        ("title",    ctypes.c_char * 256),
+        ("artist",   ctypes.c_char * 256),
+        ("album",    ctypes.c_char * 128),
+        ("duration", ctypes.c_double),
+        ("path",     ctypes.c_char * 512),
+        ("stars",    ctypes.c_int32),
     ]
 
-class NativeBackend:
-    def __init__(self, db_path="library.json"):
-        so_path = Path(__file__).parent / "engine/build/libmusic_engine.so"
-        self._lib = ctypes.CDLL(str(so_path))
-        
-        # Configurar signatures para salvaguardas de memoria
-        self._lib.engine_init.argtypes = [ctypes.c_char_p]
-        self._lib.engine_get_progress.restype = ctypes.c_double
-        self._lib.engine_get_current_track.argtypes = [ctypes.POINTER(TrackC)]
-        self._lib.engine_get_spectrum_bars.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int32]
-        
-        if self._lib.engine_init(db_path.encode('utf-8')) != 0:
-            raise RuntimeError("Fallo inicializando motor C++")
+class Track:
+    """Objeto Python compatible con el MockBackend.Track."""
+    def __init__(self, c: TrackC):
+        self.id       = c.id
+        self.title    = c.title.decode("utf-8", errors="replace")
+        self.artist   = c.artist.decode("utf-8", errors="replace")
+        self.album    = c.album.decode("utf-8", errors="replace")
+        self.duration = c.duration
+        self.path     = c.path.decode("utf-8", errors="replace")
+        self.stars    = c.stars
 
-    def toggle_play(self): self._lib.engine_toggle_play()
-    def next_track(self): self._lib.engine_play_next()
-    def prev_track(self): self._lib.engine_play_previous()
-    
-    @property
-    def progress(self): return self._lib.engine_get_progress()
-    
+class NativeBackend:
+    """
+    Reemplazo exacto de MockBackend usando el motor C++.
+    Expone los mismos atributos y métodos para que MusicBridge no cambie.
+    """
+    def __init__(self, current_user=None):
+        self._lib = ctypes.CDLL(LIB_PATH)
+        self._setup_argtypes()
+        
+        # Inicializar motor C++
+        user_id = current_user["id"] if current_user else 0
+        self._lib.engine_init(
+            b"library.json",
+            b"core/database/users_db.json",
+            ctypes.c_int(user_id)
+        )
+        
+        # Cache local de versiones para detectar cambios
+        self._lib_version_cache  = -1
+        self._queue_version_cache = -1
+        self._library_cache      = []
+        self._queue_cache        = []
+        self.current_user        = current_user
+
+    # ── Propiedades que imitan atributos del MockBackend ──────────────
     @property
     def is_playing(self): return bool(self._lib.engine_is_playing())
+    
+    @property
+    def is_paused(self):  return bool(self._lib.engine_is_paused())
+    
+    @property
+    def progress(self):   return self._lib.engine_get_progress()
+    
+    @property
+    def current_index(self): return self._lib.engine_get_current_index()
+    
+    @property
+    def queue_version(self): return self._lib.engine_get_queue_version()
+    
+    @property
+    def library_version(self): return self._lib.engine_get_library_version()
+    
+    @property
+    def library(self):
+        # Usar cache para no serializar en cada tick
+        lv = self.library_version
+        if lv != self._lib_version_cache:
+            self._library_cache = self._fetch_library()
+            self._lib_version_cache = lv
+        return self._library_cache
 
-    def get_audio_bars(self, num_bars: int) -> list[float]:
-        ArrayType = ctypes.c_float * num_bars
-        bars_array = ArrayType()
-        self._lib.engine_get_spectrum_bars(ctypes.byref(bars_array), num_bars)
-        return list(bars_array)
+    @property
+    def queue(self):
+        qv = self.queue_version
+        if qv != self._queue_version_cache:
+            self._queue_cache = self._fetch_queue()
+            self._queue_version_cache = qv
+        return self._queue_cache
 
+    # ── Métodos proxy ─────────────────────────────────────────────────
+    def play(self):            self._lib.engine_play()
+    def pause(self):           self._lib.engine_pause()
+    def toggle_play(self):     self._lib.engine_toggle_play()
+    def next_track(self):      self._lib.engine_next()
+    def prev_track(self):      self._lib.engine_prev()
+    def toggle_random(self):   return bool(self._lib.engine_toggle_random())
+    
     def get_current_track(self):
-        c_trk = TrackC()
-        if self._lib.engine_get_current_track(ctypes.byref(c_trk)):
-            from core.backend import Track
-            return Track(c_trk.id, c_trk.title.decode(), c_trk.artist.decode(),
-                         c_trk.album.decode(), c_trk.duration, c_trk.path.decode(), c_trk.stars)
+        c = TrackC()
+        if self._lib.engine_get_current_track(ctypes.byref(c)):
+            return Track(c)
         return None
+    
+    def _fetch_library(self, max_count=5000):
+        arr = (TrackC * max_count)()
+        n = self._lib.engine_get_library(arr, max_count)
+        return [Track(arr[i]) for i in range(n)]
+    
+    def _fetch_queue(self, max_count=10000):
+        arr = (TrackC * max_count)()
+        n = self._lib.engine_get_queue(arr, max_count)
+        return [Track(arr[i]) for i in range(n)]
+    
+    def _setup_argtypes(self):
+        lib = self._lib
+        lib.engine_init.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        lib.engine_get_progress.restype = ctypes.c_double
+        lib.engine_get_current_track.argtypes = [ctypes.POINTER(TrackC)]
+        lib.engine_get_current_track.restype = ctypes.c_int
+        lib.engine_get_library.argtypes = [ctypes.POINTER(TrackC), ctypes.c_int]
+        lib.engine_get_library.restype = ctypes.c_int
+        lib.engine_get_queue.argtypes = [ctypes.POINTER(TrackC), ctypes.c_int]
+        lib.engine_get_queue.restype = ctypes.c_int
+        lib.engine_get_audio_bars.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+    
+    # ── Stubs de las demás funciones (se implementan siguiendo el mismo patrón)
+    def get_audio_bars(self, n): ...
+    def get_acoustic_dna(self):  ...
+    def set_rating(self, tid, stars): ...
+    def play_selection(self, tab, row): ...
+    def rate_selection(self, tab, row, stars): ...
+    def like_track(self, tid): ...
+    def get_active_user_name(self): ...
+    def create_album(self, name): ...
+    def remove_album(self, name): ...
+    def add_track_to_album(self, album, tid): ...
+    def remove_track_from_album(self, album, tid): ...
+    def get_albums_summary(self): ...
+    def get_album_tracks(self, album): ...
+    def get_directories(self): ...
+    def jump_to_queue_index(self, i): ...
+    def generate_queue(self): ...
+    def toggle_random(self): ...
+    def is_random_mode(self): ...
 ```
 
-### `core/engine/CMakeLists.txt`
+---
+
+## 5. Plan de Implementación Paso a Paso
+
+### FASE 1: Infraestructura CMake y "Hola Mundo" cross-language
+
+**Objetivo:** Compilar un `.so` mínimo y llamarlo desde Python en menos de 2 horas.
+
+**Paso 1.1 — Escribir `CMakeLists.txt`:**
+
 ```cmake
-cmake_minimum_required(VERSION 3.16)
-project(MusicEngine LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.20)
+project(MusicEngine VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Release)
 
-include_directories(include third_party)
+# Flags de producción
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -ffast-math")
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 
+# Rutas de código fuente
+set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
+set(INC_DIR ${CMAKE_SOURCE_DIR}/include)
+set(TP_DIR  ${CMAKE_SOURCE_DIR}/third_party)
+
+# Archivos fuente (se agregan al compilar cada fase)
 set(SOURCES
-    src/Track.cpp src/DoublyLinkedList.cpp src/LibraryManager.cpp
-    src/QueueManager.cpp src/AudioPlayer.cpp src/Engine.cpp src/CApi.cpp
+    ${SRC_DIR}/Track.cpp
+    ${SRC_DIR}/PlaybackState.cpp
+    ${SRC_DIR}/DoublyLinkedList.cpp
+    ${SRC_DIR}/QueueManager.cpp
+    ${SRC_DIR}/LibraryManager.cpp
+    ${SRC_DIR}/AudioPlayer.cpp
+    ${SRC_DIR}/Engine.cpp
+    ${SRC_DIR}/CApi.cpp
 )
 
+# Biblioteca compartida (.so en Linux, .dll en Windows)
 add_library(music_engine SHARED ${SOURCES})
+target_include_directories(music_engine PRIVATE ${INC_DIR} ${TP_DIR})
 
-find_library(ALSA asound)
-if(ALSA)
-    target_link_libraries(music_engine pthread dl m ${ALSA})
-else()
-    target_link_libraries(music_engine pthread dl m)
-endif()
+# Linking: solo dl en Linux (miniaudio lo necesita para dlopen)
+target_link_libraries(music_engine PRIVATE dl pthread m)
 ```
+
+**Paso 1.2 — Hola Mundo mínimo para validar la cadena:**
+
+En `CApi.cpp`:
+```cpp
+#include <cstring>
+extern "C" {
+    const char* engine_hello() { return "C++ engine online"; }
+}
+```
+
+En Python:
+```python
+import ctypes
+lib = ctypes.CDLL("./core/engine/build/libmusic_engine.so")
+lib.engine_hello.restype = ctypes.c_char_p
+print(lib.engine_hello())  # → b"C++ engine online"
+```
+
+**Comandos de compilación:**
+```bash
+cd core/engine
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+# Resultado: build/libmusic_engine.so
+```
+
+**Criterio de éxito Fase 1:** `python -c "import ctypes; lib=ctypes.CDLL('./core/engine/build/libmusic_engine.so'); print('OK')"` sin errores.
+
+---
+
+### FASE 2: Carga de JSON y Estructuras de Datos
+
+**Objetivo:** LibraryManager y QueueManager completamente funcionales, dados de prueba desde `library.json`.
+
+**Orden de implementación:**
+1. `Track.cpp` — constructor, `to_c()`, `from_json(nlohmann::json&)`
+2. `LibraryManager.cpp` — `load_from_json()`, `scan_directories()`, `get_snapshot()`
+3. `DoublyLinkedList.cpp` — template completo con nodos, push_back, move_next, move_prev, jump_to_index
+4. `QueueManager.cpp` — `generate()` secuencial, `generate()` random ponderado, `get_snapshot()`
+5. `CApi.cpp` — `engine_get_library()`, `engine_get_queue()`, `engine_get_queue_version()`
+6. `backend_native.py` — `library` property, `queue` property, `queue_version` property
+
+**Test de validación Fase 2:**
+```python
+from core.backend_native import NativeBackend
+b = NativeBackend({"id": 1, "name": "Test"})
+tracks = b.library
+print(f"{len(tracks)} pistas cargadas")
+print(tracks[0].title, tracks[0].duration)
+```
+
+---
+
+### FASE 3: Motor de Audio (AudioPlayer + control_loop)
+
+**Objetivo:** Reproducción real, pausa, next/prev, sin Pygame, con detección correcta de fin de pista.
+
+**Orden de implementación:**
+1. `AudioPlayer.cpp`:
+   - `initialize()`: `ma_engine_init(NULL, &engine)` o configuración custom
+   - `load_and_play(path, duration)`: `ma_sound_init_from_file`, `ma_sound_start`
+   - `pause()` / `resume()`: `ma_sound_stop` / `ma_sound_start`
+   - `is_hardware_busy()`: `ma_sound_is_playing(&sound)`
+   - `get_file_duration(path)`: `ma_decoder_init_file` → `ma_decoder_get_length_in_pcm_frames` / sample_rate
+2. `Engine.cpp`:
+   - `_control_loop()`: corre cada 50ms, acumula progreso, detecta `!audio_player.is_hardware_busy()` para `next_track()`
+   - Toda la lógica de `toggle_play()`, `next_track()` bajo mutex
+
+**Pausa sin reinicio (lección aprendida de Python):**
+```cpp
+void Engine::toggle_play() {
+    std::lock_guard<std::mutex> lock(control_mutex);
+    if (state.is_playing.load()) {
+        audio_player.pause();
+        state.is_playing.store(false);
+        state.is_paused.store(true);
+    } else {
+        if (state.is_paused.load()) {
+            audio_player.resume();  // ← NO llama a load_and_play()
+        } else {
+            audio_player.load_and_play(current_track->path, current_track->duration);
+        }
+        state.is_playing.store(true);
+        state.is_paused.store(false);
+    }
+}
+```
+
+**Criterio de éxito Fase 3:** Reproducir MP3 VBR completo, pausar/reanudar sin reinicio, saltar pistas, auto-saltar al terminar.
+
+---
+
+### FASE 4: Integración Final con bridge.py
+
+**Objetivo:** La UI Python funciona idéntica pero el audio corre en C++.
+
+1. Completar todos los stubs de `backend_native.py`:
+   - `get_audio_bars()` → `engine_get_audio_bars()`
+   - `get_acoustic_dna()` → genera el DNA en Python usando semilla del Engine
+   - Gestión de álbumes completa
+2. Modificar `core/bridge.py`:
+   ```python
+   def __init__(self, current_user=None):
+       try:
+           from core.backend_native import NativeBackend
+           self.backend = NativeBackend(current_user)
+           logger.info("Motor C++ activo.")
+       except Exception as e:
+           logger.warning(f"Motor C++ no disponible ({e}). Usando Python.")
+           from core.backend import MockBackend
+           self.backend = MockBackend(current_user)
+   ```
+3. Tests de regresión visual: ejecutar la app completa y verificar que las 4 pestañas, los álbumes, las calificaciones y el visualizador funcionen exactamente igual.
+
+---
+
+## 6. Contrato de la C-API
+
+Tabla completa de funciones exportadas que `backend_native.py` deberá mapear:
+
+| Función C | Firma | Equivalente Python |
+|---|---|---|
+| `engine_init` | `(char*, char*, int) → void` | `MockBackend.__init__()` |
+| `engine_shutdown` | `() → void` | `del backend` |
+| `engine_play` | `() → void` | `backend.play()` |
+| `engine_pause` | `() → void` | `backend.pause()` |
+| `engine_toggle_play` | `() → void` | `backend.toggle_play()` |
+| `engine_next` | `() → void` | `backend.next_track()` |
+| `engine_prev` | `() → void` | `backend.prev_track()` |
+| `engine_jump_to_index` | `(int) → void` | `backend.jump_to_queue_index(i)` |
+| `engine_get_current_track` | `(TrackC*) → int` | `backend.get_current_track()` |
+| `engine_get_progress` | `() → double` | `backend.progress` |
+| `engine_is_playing` | `() → int` | `backend.is_playing` |
+| `engine_is_paused` | `() → int` | `backend.is_paused` |
+| `engine_get_current_index` | `() → int` | `backend.current_index` |
+| `engine_get_queue_version` | `() → int` | `backend.queue_version` |
+| `engine_get_library_version` | `() → int` | `backend.library_version` |
+| `engine_get_library` | `(TrackC*, int) → int` | `backend.library` |
+| `engine_get_queue` | `(TrackC*, int) → int` | `backend.queue` |
+| `engine_toggle_random` | `() → int` | `backend.toggle_random()` |
+| `engine_set_rating` | `(int, int) → void` | `backend.set_rating()` |
+| `engine_get_audio_bars` | `(float*, int) → void` | `backend.get_audio_bars(n)` |
+| `engine_get_active_user_name` | `(char*, int) → void` | `backend.get_active_user_name()` |
+| `engine_like_track` | `(int) → int` | `backend.like_track(id)` |
+| `engine_create_album` | `(char*) → int` | `backend.create_album(name)` |
+| `engine_remove_album` | `(char*) → int` | `backend.remove_album(name)` |
+| `engine_add_track_to_album` | `(char*, int) → int` | `backend.add_track_to_album()` |
+| `engine_remove_track_from_album` | `(char*, int) → int` | `backend.remove_track_from_album()` |
+| `engine_get_albums_summary` | `(char**, int*, int) → int` | `backend.get_albums_summary()` |
+| `engine_get_album_tracks` | `(char*, TrackC*, int) → int` | `backend.get_album_tracks()` |
+
+---
+
+*Fin del ARCHITECTURE MASTER PLAN v2.0*  
+*El prototipo Python es la especificación ejecutable de todo lo anterior.*
