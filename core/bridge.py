@@ -71,3 +71,45 @@ class MusicBridge:
     def toggle_like(self, track_id: int) -> bool:
         """Añade o remueve el like de una pista para el usuario actual."""
         return self.backend.like_track(track_id)
+
+    def create_album(self, album_name: str) -> bool:
+        """Crea un álbum vacío para el usuario. Falla si ya existe."""
+        try:
+            return self.backend.create_album(album_name)
+        except Exception:
+            return False
+
+    def add_track_to_album(self, album_name: str, track_id: int) -> bool:
+        """Añade un ID de canción al álbum."""
+        try:
+            return self.backend.add_track_to_album(album_name, track_id)
+        except Exception:
+            return False
+
+    def get_albums_summary(self) -> list[dict]:
+        """Retorna una lista con la estructura: [{'name': 'Rock', 'count': 5}, ...]"""
+        try:
+            return self.backend.get_albums_summary()
+        except Exception:
+            return []
+
+    def get_album_tracks(self, album_name: str) -> list:
+        """Retorna los objetos Track reales que pertenecen al álbum indicado."""
+        try:
+            return self.backend.get_album_tracks(album_name)
+        except Exception:
+            return []
+
+    def remove_album(self, album_name: str) -> bool:
+        """Elimina un álbum completo del usuario activo."""
+        try:
+            return self.backend.remove_album(album_name)
+        except Exception:
+            return False
+
+    def remove_track_from_album(self, album_name: str, track_id: int) -> bool:
+        """Elimina una pista específica de un álbum del usuario activo."""
+        try:
+            return self.backend.remove_track_from_album(album_name, track_id)
+        except Exception:
+            return False

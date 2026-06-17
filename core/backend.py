@@ -15,16 +15,27 @@ from pathlib import Path
 from core.logger import get_logger
 from core.cava import CavaSubprocess
 
+try:
+    # pyrefly: ignore [missing-import]
+    import mutagen
+    HAS_MUTAGEN = True
+except ImportError:
+    HAS_MUTAGEN = False
+
 logger = get_logger("Backend")
 
 try:
     import pygame
-    HAS_PYGAME = True
+    # Evitar crash en entorno headless/terminal
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    pygame.init()
     pygame.mixer.init()
-    logger.info("Motor de audio Pygame inicializado.")
-except Exception:
+    # Ya no usamos set_endevent debido al bug de VBR en Pygame
+    HAS_PYGAME = True
+    logger.info("Motor de audio Pygame inicializado (Modo Anti-VBR-Bug activo).")
+except Exception as e:
     HAS_PYGAME = False
-    logger.warning("Pygame no disponible. Modo simulación activado.")
+    logger.warning(f"Pygame no disponible ({e}). Modo simulación activado.")
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +83,7 @@ class MockBackend:
         self.queue          = []
         self.current_index  = -1
         self.is_playing     = False
+        self.is_paused      = False
         self.progress       = 0.0
         self.queue_version  = 0
         self.library_version = 0
@@ -98,7 +110,7 @@ class MockBackend:
             return self.current_user["name"]
         return "Invitado"
 
-    def _save_user_db(self):
+    def _save_user_data(self):
         if not self.current_user:
             return
         
@@ -137,13 +149,75 @@ class MockBackend:
             is_liked = True
             logger.info(f"Pista {track_id} añadida a likes del usuario {self.current_user['name']}")
             
-        self._save_user_db()
+        self._save_user_data()
         return is_liked
 
     def get_user_albums(self) -> dict:
         if not self.current_user:
             return {}
         return self.current_user.get("liked_albums", {})
+
+    def create_album(self, album_name: str) -> bool:
+        if not self.current_user:
+            return False
+        albums = self.current_user.setdefault("liked_albums", {})
+        if album_name in albums:
+            return False
+        albums[album_name] = []
+        self._save_user_data()
+        return True
+
+    def add_track_to_album(self, album_name: str, track_id: int) -> bool:
+        if not self.current_user:
+            return False
+        albums = self.current_user.setdefault("liked_albums", {})
+        if album_name not in albums:
+            return False
+        if track_id not in albums[album_name]:
+            albums[album_name].append(track_id)
+            self._save_user_data()
+            return True
+        return False
+
+    def get_albums_summary(self) -> list[dict]:
+        if not self.current_user:
+            return []
+        albums = self.current_user.get("liked_albums", {})
+        return [{"name": name, "count": len(tracks)} for name, tracks in albums.items()]
+
+    def get_album_tracks(self, album_name: str) -> list:
+        if not self.current_user:
+            return []
+        albums = self.current_user.get("liked_albums", {})
+        track_ids = albums.get(album_name, [])
+        # Filtrar de self.library los tracks que coinciden con los ids
+        # Para mantener el orden de inserción, mapeamos los ids.
+        library_dict = {t.id: t for t in self.library}
+        return [library_dict[tid] for tid in track_ids if tid in library_dict]
+
+    def remove_album(self, album_name: str) -> bool:
+        if not self.current_user:
+            return False
+        albums = self.current_user.setdefault("liked_albums", {})
+        if album_name not in albums:
+            return False
+        del albums[album_name]
+        self._save_user_data()
+        logger.info(f"Álbum '{album_name}' eliminado del usuario {self.current_user['name']}.")
+        return True
+
+    def remove_track_from_album(self, album_name: str, track_id: int) -> bool:
+        if not self.current_user:
+            return False
+        albums = self.current_user.setdefault("liked_albums", {})
+        if album_name not in albums:
+            return False
+        if track_id not in albums[album_name]:
+            return False
+        albums[album_name].remove(track_id)
+        self._save_user_data()
+        logger.info(f"Pista {track_id} eliminada del álbum '{album_name}'.")
+        return True
 
     # -----------------------------------------------------------------------
     # INICIALIZACIÓN DE LA BIBLIOTECA
@@ -172,10 +246,20 @@ class MockBackend:
                 for root, _, files in os.walk(p):
                     for file in files:
                         if file.endswith(('.mp3', '.wav', '.ogg', '.flac')):
+                            file_path = os.path.join(root, file)
+                            duration = random.randint(150, 280)
+                            if HAS_MUTAGEN:
+                                try:
+                                    audio = mutagen.File(file_path)
+                                    if audio is not None and audio.info is not None:
+                                        duration = audio.info.length
+                                except Exception as e:
+                                    logger.warning(f"No se pudo leer duración de {file}: {e}")
+                            
                             self.library.append(Track(
                                 track_id, file.rsplit('.', 1)[0][:35],
-                                "Artista Local", "Local", random.randint(150, 280),
-                                os.path.join(root, file), 1
+                                "Artista Local", "Local", duration,
+                                file_path, 1
                             ))
                             track_id += 1
 
@@ -244,6 +328,7 @@ class MockBackend:
             try:
                 pygame.mixer.music.load(track.path)
                 pygame.mixer.music.play()
+                self.is_paused = False
             except Exception as e:
                 logger.error(f"Fallo al reproducir en Pygame: {e}")
 
@@ -252,13 +337,15 @@ class MockBackend:
             self.is_playing = True
             logger.info("Reproducción INICIADA.")
             if HAS_PYGAME:
-                if not pygame.mixer.music.get_busy():
-                    self._play_current_real()
-                else:
+                if self.is_paused:
                     pygame.mixer.music.unpause()
+                    self.is_paused = False
+                else:
+                    self._play_current_real()
 
     def pause(self):
         self.is_playing = False
+        self.is_paused = True
         logger.info("Reproducción PAUSADA.")
         if HAS_PYGAME:
             pygame.mixer.music.pause()
@@ -347,7 +434,7 @@ class MockBackend:
     # -----------------------------------------------------------------------
 
     def _playback_loop(self):
-        """Calcula el progreso matemáticamente preciso."""
+        """Calcula el progreso, limitándolo al 100%, y detecta el fin vía Pygame."""
         while self._running:
             time.sleep(0.05)
             now = time.time()
@@ -356,10 +443,27 @@ class MockBackend:
 
             with self._lock:
                 if self.is_playing and self.queue:
-                    current_track    = self.queue[self.current_index]
-                    self.progress   += dt
+                    current_track = self.queue[self.current_index]
+                    self.progress += dt
 
-                    if self.progress >= current_track.duration:
+                    # Al tener la duración exacta de Mutagen, es seguro limitar el progreso visual
+                    if self.progress > current_track.duration:
+                        self.progress = current_track.duration
+
+                    track_ended = False
+                    
+                    if HAS_PYGAME:
+                        # VBR MP3 BUG FIX: Ignorar TRACK_END.
+                        # Si está reproduciendo, NO está en pausa, y la tarjeta de sonido ya no recibe datos:
+                        if not self.is_paused and not pygame.mixer.music.get_busy():
+                            if self.progress > 1.0:
+                                track_ended = True
+                    else:
+                        # En modo simulación (sin pygame) dependemos del tiempo
+                        if self.progress >= current_track.duration:
+                            track_ended = True
+
+                    if track_ended:
                         self._next_track_locked()
 
     # Paleta nocturna compartida con la UI (una atmósfera por perfil de ADN).
