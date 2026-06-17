@@ -21,8 +21,8 @@ class MusicBridge:
       esta fachada permanece idéntica.
     """
 
-    def __init__(self):
-        self.backend = MockBackend()
+    def __init__(self, current_user=None):
+        self.backend = MockBackend(current_user)
 
     # ── Controles de reproducción ────────────────────────────────────────
     def play(self):                  self.backend.play()
@@ -62,3 +62,12 @@ class MusicBridge:
     def get_acoustic_dna(self) -> dict:
         """Huella acústica de la pista activa (semilla, perfil, color ambiental)."""
         return self.backend.get_acoustic_dna()
+
+    # ── Gestión de Usuarios ──────────────────────────────────────────────
+    def get_current_username(self) -> str:
+        """Retorna el nombre del usuario activo."""
+        return self.backend.get_active_user_name()
+
+    def toggle_like(self, track_id: int) -> bool:
+        """Añade o remueve el like de una pista para el usuario actual."""
+        return self.backend.like_track(track_id)

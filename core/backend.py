@@ -66,7 +66,8 @@ class MockBackend:
     envolventes rítmicas derivadas del estado del reproductor.
     """
 
-    def __init__(self):
+    def __init__(self, current_user=None):
+        self.current_user   = current_user
         self.library        = []
         self.queue          = []
         self.current_index  = -1
@@ -91,6 +92,58 @@ class MockBackend:
         self._thread    = threading.Thread(target=self._playback_loop, daemon=True)
         self._thread.start()
         logger.info("Backend instanciado y bucle de audio iniciado.")
+
+    def get_active_user_name(self) -> str:
+        if self.current_user and "name" in self.current_user:
+            return self.current_user["name"]
+        return "Invitado"
+
+    def _save_user_db(self):
+        if not self.current_user:
+            return
+        
+        users_db_path = os.path.join(os.path.dirname(__file__), "database", "users_db.json")
+        if not os.path.exists(users_db_path):
+            return
+            
+        with self._lock:
+            try:
+                with open(users_db_path, "r", encoding="utf-8") as f:
+                    db_data = json.load(f)
+                    
+                users = db_data.get("users", [])
+                for i, u in enumerate(users):
+                    if u["id"] == self.current_user["id"]:
+                        users[i] = self.current_user
+                        break
+                        
+                with open(users_db_path, "w", encoding="utf-8") as f:
+                    json.dump(db_data, f, indent=4)
+            except Exception as e:
+                logger.error(f"Error guardando users_db.json: {e}")
+
+    def like_track(self, track_id: int) -> bool:
+        if not self.current_user:
+            return False
+            
+        liked = self.current_user.setdefault("liked_tracks", [])
+        
+        if track_id in liked:
+            liked.remove(track_id)
+            is_liked = False
+            logger.info(f"Pista {track_id} eliminada de likes del usuario {self.current_user['name']}")
+        else:
+            liked.append(track_id)
+            is_liked = True
+            logger.info(f"Pista {track_id} añadida a likes del usuario {self.current_user['name']}")
+            
+        self._save_user_db()
+        return is_liked
+
+    def get_user_albums(self) -> dict:
+        if not self.current_user:
+            return {}
+        return self.current_user.get("liked_albums", {})
 
     # -----------------------------------------------------------------------
     # INICIALIZACIÓN DE LA BIBLIOTECA

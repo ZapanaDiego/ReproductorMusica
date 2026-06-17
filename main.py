@@ -18,9 +18,9 @@ from ui.info_panel import InfoPanel
 class MusicPlayerApp(App):
     CSS_PATH = Path("styles.tcss")
 
-    def __init__(self):
+    def __init__(self, user_data=None):
         super().__init__()
-        self.bridge = MusicBridge()
+        self.bridge = MusicBridge(user_data)
         self.input_manager = InputController(self.bridge, self)
         
         self.active_tab = "library"
@@ -175,5 +175,7 @@ class MusicPlayerApp(App):
                 table.move_cursor(row=curr_idx)
 
 if __name__ == "__main__":
-    app = MusicPlayerApp()
+    from core.user_manager import bootstrap_system
+    user_data = bootstrap_system()
+    app = MusicPlayerApp(user_data)
     app.run()
