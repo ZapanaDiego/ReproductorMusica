@@ -18,8 +18,7 @@ struct TrackC {
   char album[MAX_STR_LEN];  // 256 bytes para lamacenar el album de la cancion
   double duracion;          // 8 bytes para lamacenar la duracion de la cancion
   char path[MAX_STR_LEN];   // 256 bytes para lamacenar la ruta de la cancion
-  int32_t estrellas; // 4 bytes para lamacenar la calificacion de estrellas de
-                     // la cancion
+  int32_t estrellas; // 4 bytes para lamacenar la calificacion de estrellas de la cancion
 };
 
 class Track {

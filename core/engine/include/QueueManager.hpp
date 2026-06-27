@@ -18,7 +18,7 @@ private:
     int obtener_peso_por_estrellas(int32_t estrellas) {
         if (estrellas <= 1) return 1;
         if (estrellas == 2) return 3;
-        return 6; // Si tiene 3 estrellas (o mas por error), el peso probabilistico es 6
+        return 6;
     }
 
 public:
@@ -57,7 +57,7 @@ public:
                 if (valor_aleatorio < peso_acumulado) {
                     lista_cola.push_back(*iterador);
                     piscina_canciones.erase(iterador);
-                    break; //salimos inmediatamente evitando la invalidacion del iterador
+                    break;
                 }
             }
         }
